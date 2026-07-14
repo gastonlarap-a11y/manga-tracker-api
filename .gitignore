@@ -1,0 +1,23 @@
+# deps
+node_modules/
+
+# generated
+/src/generated/prisma
+
+# env & secrets
+.env
+.env.*
+
+# local data (SQLite)
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# IDE
+.idea/
+
+# Claude Code local
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/.cc-writes/

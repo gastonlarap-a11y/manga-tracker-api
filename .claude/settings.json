@@ -1,0 +1,22 @@
+{
+  "enabledPlugins": {
+    "api-design@gaston-plugins": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(bun install:*)",
+      "Bash(bun test:*)",
+      "Bash(bun run lint:*)",
+      "Bash(bun run format:*)",
+      "Bash(bun run typecheck:*)",
+      "Bash(bun run db:generate:*)"
+    ],
+    "ask": ["Bash(bun run db:migrate:*)", "Bash(git push:*)"],
+    "deny": [
+      "Read(**/.env)",
+      "Read(**/.env.*)",
+      "Read(./src/generated/**)",
+      "Read(./**/*.db)"
+    ]
+  }
+}
