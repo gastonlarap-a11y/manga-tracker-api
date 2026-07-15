@@ -17,6 +17,13 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - Lint: `bun run lint` · Format: `bun run format` · Typecheck: `bun run typecheck`
 - Prisma client: `bun run db:generate` · Migrations: `bun run db:migrate`
 
+> `typescript@7` is the **native compiler (tsgo)**: it ships no `tsserver.js`, so
+> the old `typescript.tsdk` cannot point VS Code at it. Editor IntelliSense uses the
+> "TypeScript (Native Preview)" extension via `js/ts.experimental.useTsgo` +
+> `js/ts.tsdk.path` (wired in `.vscode/`; these are the `js/ts.*` namespace that
+> replaced the deprecated `typescript.*` settings); `bun run typecheck` runs the
+> same tsgo binary.
+
 ## Rules
 - Every route is defined with `createRoute` (zod-openapi) so it appears in `/openapi.json`
   and the `/docs` Swagger UI; Zod schemas are the source of truth for request/response types.
