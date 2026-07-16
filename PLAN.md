@@ -30,7 +30,7 @@ Herramienta local en macOS que trackea automáticamente qué manga/manhwa se lee
 | SQLite | 3.46+ | DB (archivo local) |
 | React | 19 | Extension popup + dashboard |
 | Vite | 8 | Bundler (con Rolldown) |
-| CRXJS | 2.6.1 | Vite plugin para Chrome extensions |
+| WXT | 0.20.x | Framework para la extensión (CLI con soporte Bun, manifest generado, HMR) |
 | Manifest V3 | — | Único soportado por Chrome desde ago 2026 |
 
 ## Arquitectura
@@ -138,8 +138,8 @@ Estado inicial (YA hecho en el repo): dependencias instaladas (`hono`, `@hono/zo
 Estado en `src/index.ts` (toda ruta se define con `createRoute` + Zod, NO `Hono` plano):
 - **Bind a `127.0.0.1`** — hecho (`hostname: "127.0.0.1"` en el `export default`).
 - Puerto fijo `5150` — hecho (default en `src/config.ts`).
-- `hono/cors` — allowlist con `http://127.0.0.1:5150` y `http://localhost:5150`; falta solo
-  `chrome-extension://<extension-id>` (cuando exista la extensión).
+- `hono/cors` — allowlist con `http://127.0.0.1:5150`, `http://localhost:5150` y
+  `chrome-extension://cfjiinlnepkmlaafdclmlpjbmpofplop` (id fijo de la extensión, ver Fase 4).
 - Módulos montados bajo el prefijo `/api` — hecho (`health` queda en `/health`).
 
 **Verificación:** `curl http://localhost:5150/health` responde `{ "status": "ok" }`, y solo desde
@@ -272,34 +272,41 @@ Docs: https://www.launchd.info/ · https://bun.sh/docs/runtime/http/server
 
 ### Fase 4 — Extensión esqueleto (MV3)
 
+> **Estado (jul 2026): hecha (código); pendiente la verificación manual en navegadores.**
+> **Decisión: WXT en lugar de CRXJS** — a jul 2026 WXT tiene CLI con soporte Bun nativo,
+> manifest auto-generado desde `wxt.config.ts`, entrypoints por archivo y mejor HMR; CRXJS
+> exige scaffolding vía npm y manifest manual. Plasmo está en modo mantenimiento.
+
 Nuevo proyecto separado:
 ```bash
 cd /Users/gaston/Documents/Git
-bunx create-crxjs manga-tracker-extension --template react-ts
-cd manga-tracker-extension
+bunx wxt@latest init manga-tracker-extension -t react --pm bun
+cd manga-tracker-extension && bun install
 ```
 
-`manifest.json`:
-```json
-{
-  "manifest_version": 3,
-  "name": "Manga Tracker",
-  "version": "0.1.0",
-  "permissions": ["storage", "activeTab", "scripting"],
-  "optional_host_permissions": ["https://*/*", "http://*/*"],
-  "host_permissions": ["http://localhost:5150/*"],
-  "background": { "service_worker": "src/background/index.ts", "type": "module" },
-  "action": { "default_popup": "src/popup/index.html" }
-}
-```
+El manifest NO se escribe a mano: se define en `wxt.config.ts` (clave `manifest`) y WXT lo
+genera en `.output/<target>/manifest.json`. Configurado:
 
-Popup React que hace ping a `GET /health` y muestra estado. Cargar como unpacked en Brave y Chrome. Capturar el extension-id resultante y ajustar CORS del backend.
+- `permissions: ["storage", "activeTab", "scripting"]`
+- `host_permissions: ["http://localhost:5150/*"]`
+- `optional_host_permissions: ["https://*/*", "http://*/*"]`
+- `key` fija (pubkey RSA; el `.pem` queda gitignorado) → extension-id estable
+  `cfjiinlnepkmlaafdclmlpjbmpofplop`, ya agregado al CORS del backend sin esperar la carga
+  manual.
+
+Popup React que hace ping a `GET /health` y muestra estado. Cargar como unpacked
+(`.output/chrome-mv3-dev/` en dev) en Brave y Chrome; el id debe coincidir con el calculado.
 
 **Verificación:** popup en ambos navegadores muestra "Conectado".
 
-Docs: https://crxjs.dev/vite-plugin · https://developer.chrome.com/docs/extensions/mv3/intro
+Docs: https://wxt.dev/guide/installation.html · https://developer.chrome.com/docs/extensions/mv3/intro
 
 ### Fase 5 — Handshake end-to-end con botón manual
+
+> **Estado (jul 2026): hecha (código); pendiente la verificación manual end-to-end.**
+> Implementado: content script con `registration: "runtime"` (inyectado bajo demanda con
+> `activeTab` + `scripting`, devuelve `{title, url}` de la página) y botón "Enviar evento
+> test" en el popup que arma el payload con datos reales de la pestaña activa.
 
 Content script inyectado bajo demanda. Botón temporal en el popup "Enviar evento test" que envía un payload dummy. Verificar que llega, se guarda, y que un evento enviado desde Brave se ve al consultar `GET /api/library` desde Chrome (mismo backend).
 
@@ -384,6 +391,6 @@ Vistas:
 - Prisma + Bun SQLite: https://www.prisma.io/docs/orm/overview/databases/sqlite
 - Chrome Extensions MV3: https://developer.chrome.com/docs/extensions
 - Chrome Local Network Access: https://developer.chrome.com/blog/local-network-access
-- Vite + CRXJS: https://crxjs.dev/vite-plugin
+- WXT: https://wxt.dev
 - React 19: https://react.dev
 - launchd: https://www.launchd.info
