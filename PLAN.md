@@ -353,6 +353,14 @@ Interceptar `history.pushState`, `history.replaceState`, evento `popstate`. Re-c
 
 ### Fase 10 — Dashboard
 
+> **Estado (jul 2026): hecha.** Repo `manga-tracker-dashboard` creado (React 19 + Jotai +
+> Vite 8 + react-router 8; tooling Bun/Biome/tsgo/vitest espejo de la extensión). Las tres
+> vistas implementadas con tests (22), incluida la corrección manual de nombres
+> (`PUT /api/mangas/:id`, Fase 9). `bun run deploy` copia `dist/` a
+> `manga-tracker-api/public/` y el backend lo sirve con `serveStatic` de `hono/bun`:
+> `/assets/*` + rutas SPA conocidas (`/`, `/manga/:id`, `/duplicates`) — sin wildcard,
+> así `/api`, `/docs` y `/openapi.json` conservan sus 404 reales.
+
 Proyecto separado:
 ```bash
 cd /Users/gaston/Documents/Git
