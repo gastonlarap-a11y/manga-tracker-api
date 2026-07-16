@@ -13,7 +13,12 @@ const app = new OpenAPIHono();
 app.use(
   "*",
   cors({
-    origin: ["http://127.0.0.1:5150", "http://localhost:5150"],
+    origin: [
+      "http://127.0.0.1:5150",
+      "http://localhost:5150",
+      // manga-tracker-extension: id pinned by the fixed manifest key.
+      "chrome-extension://cfjiinlnepkmlaafdclmlpjbmpofplop",
+    ],
   }),
 );
 
