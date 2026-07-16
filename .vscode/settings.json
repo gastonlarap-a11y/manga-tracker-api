@@ -1,0 +1,51 @@
+{
+  // --- TYPESCRIPT (tsgo nativo, TS 7) ---
+  "js/ts.experimental.useTsgo": true,
+  "js/ts.tsdk.path": "./node_modules/typescript", // editor usa el MISMO TS 7 que `bun run typecheck`
+  "js/ts.preferences.importModuleSpecifierEnding": "minimal",
+
+  // --- FORMATEO Y AUTO-FIX (BIOME + PRISMA) ---
+  "editor.formatOnSave": true,
+  "editor.codeActionsOnSave": {
+    "source.fixAll.biome": "explicit",
+    "source.organizeImports.biome": "explicit"
+  },
+  "[javascript]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[typescript]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[json]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[jsonc]": { "editor.defaultFormatter": "biomejs.biome" },
+  "[prisma]": { "editor.defaultFormatter": "Prisma.prisma" },
+
+  // --- MEJORAS VISUALES Y MINIMALISMO ---
+  "editor.fontSize": 16,
+  "editor.lineHeight": 22,
+  "editor.fontFamily": "'JetBrains Mono', 'Fira Code', Consolas, monospace",
+  "editor.fontLigatures": true,
+  "editor.minimap.enabled": false, // Desactiva el minimapa para ganar espacio visual
+  "editor.renderWhitespace": "selection", // Solo muestra espacios en texto seleccionado
+  "editor.guides.bracketPairs": "active", // Colorea guías de llaves activas ({ })
+  "editor.bracketPairColorization.enabled": true, // Colorea pares de llaves para no perderse en rutas de Hono
+  "workbench.iconTheme": "material-icon-theme", // Iconos limpios para carpetas de backend
+  "window.zoomLevel": 0.5,
+
+  // --- OPTIMIZACIÓN DE ERROR LENS (VISUAL) ---
+  "errorLens.enabledDiagnosticLevels": ["error", "warning"],
+  "errorLens.excludeBySource": ["ts(6133)", "ts(6196)"], // Ignora variables no usadas temporalmente en la UI
+
+  // --- EXCLUSIÓN DE ARCHIVOS MOLESTOS ---
+  "files.exclude": {
+    "**/.git": true,
+    "**/.DS_Store": true,
+    "**/node_modules": true,
+    "**/.bun-cache": true
+  },
+  "search.exclude": {
+    "src/generated": true, // Cliente Prisma generado
+    "bun.lock": true,
+    "**/*.db*": true // SQLite local (dev.db y journals)
+  },
+  "terminal.integrated.fontSize": 16,
+  "terminal.integrated.cursorStyle": "line",
+  "terminal.integrated.cursorBlinking": true,
+  "terminal.integrated.gpuAcceleration": "auto"
+}

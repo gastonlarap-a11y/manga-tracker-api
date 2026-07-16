@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "oven.bun-vscode", // Runtime, debugger y test runner de Bun
+    "TypeScriptTeam.native-preview", // Language server tsgo (TypeScript 7)
+    "biomejs.biome", // Lint + format (asumido por settings.json)
+    "Prisma.prisma", // schema.prisma: syntax, formateo y autocompletado
+    "usernamehw.errorlens", // Diagnósticos inline (configurado en settings.json)
+    "PKief.material-icon-theme" // Tema de iconos referenciado en settings.json
+  ]
+}

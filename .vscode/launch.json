@@ -1,0 +1,28 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "bun",
+      "request": "launch",
+      "name": "Debug API (src/index.ts)",
+      "program": "${workspaceFolder}/src/index.ts",
+      "cwd": "${workspaceFolder}",
+      "watchMode": false,
+      "stopOnEntry": false
+    },
+    {
+      "type": "bun",
+      "request": "launch",
+      "name": "Debug archivo actual",
+      "program": "${file}",
+      "cwd": "${workspaceFolder}",
+      "watchMode": false
+    },
+    {
+      "type": "bun",
+      "request": "attach",
+      "name": "Attach a Bun (:6499)",
+      "url": "ws://localhost:6499/"
+    }
+  ]
+}
