@@ -4,17 +4,17 @@ description: Deploy the backend as a macOS LaunchAgent — prod DB migrations pl
 disable-model-invocation: true
 ---
 
-# Deploy (macOS LaunchAgent) — PENDING VALIDATION
+# Deploy (macOS LaunchAgent)
 
-Procedure quoted from `PLAN.md` Fase 3; the LaunchAgent is not installed yet. Validate each
-step on first real use, then remove this marker.
+Installed and validated 2026-07-16 (health probe + kill/auto-restart). The bun binary comes
+from mise: `/Users/gaston/.local/share/mise/installs/bun/latest/bin/bun` — not Homebrew.
 
 Production runs `bun run src/index.ts` from this repo via
 `~/Library/LaunchAgents/com.mangatracker.plist` (RunAtLoad + KeepAlive), DB at
 `~/Library/Application Support/MangaTracker/mangatracker.db`, port 5150, logs in
 `~/Library/Logs/MangaTracker/`.
 
-## First-time install
+## First-time install (already done on this Mac; kept for reinstalls/migrations)
 1. `mkdir -p ~/Library/Application\ Support/MangaTracker ~/Library/Logs/MangaTracker`
 2. `DATABASE_URL="file:$HOME/Library/Application Support/MangaTracker/mangatracker.db" bunx --bun prisma migrate deploy`
 3. Create the plist (full XML in `PLAN.md` Fase 3) and load it:

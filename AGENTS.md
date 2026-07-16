@@ -12,6 +12,7 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `src/lib/` — pure shared utilities (slug normalization, chapter parsing) with colocated tests
 - `src/generated/prisma/` — generated Prisma client (never edit; gitignored)
 - `prisma/schema.prisma` — data model; migrations live in `prisma/migrations/`
+- `bunfig.toml` + `test-setup.ts` — bun test preload: throwaway per-run SQLite DB (migrations via `bun:sqlite`)
 - `PLAN.md` + `docs/GUIA-IMPLEMENTACION.md` — roadmap and module specs (events, library, adapters, duplicates)
 
 ## Commands
