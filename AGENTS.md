@@ -35,7 +35,8 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 
 ## Architecture
 - Reading progress is stored as append-only events; current state is derived by projection —
-  event rows are never UPDATEd or DELETEd.
+  event rows are never UPDATEd or DELETEd. The only report that does not append: a repeat
+  of the manga's latest chapter within 6 h (tab reload noise) returns the existing event.
 - One module = one vertical slice under `src/modules/<name>/` (routes + service + tests
   together).
 - Dependency direction: `src/index.ts` → `src/modules/*` → `src/db` / `src/config` / `src/lib`;
