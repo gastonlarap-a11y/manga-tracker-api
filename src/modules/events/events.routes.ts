@@ -37,6 +37,11 @@ const postEventRoute = createRoute({
       description: "Reading event recorded",
       content: { "application/json": { schema: createEventResponseSchema } },
     },
+    200: {
+      description:
+        "Duplicate report of the latest chapter within the dedup window; the existing event is returned",
+      content: { "application/json": { schema: createEventResponseSchema } },
+    },
     400: {
       description: "Invalid request",
       content: { "application/json": { schema: errorSchema } },
@@ -48,7 +53,8 @@ export const eventsRoutes = new OpenAPIHono({ defaultHook }).openapi(
   postEventRoute,
   async (c) => {
     const body = c.req.valid("json");
-    const { manga, event } = await recordReadingEvent(body);
-    return c.json({ manga: toMangaDto(manga), event: toEventDto(event) }, 201);
+    const { manga, event, created } = await recordReadingEvent(body);
+    const payload = { manga: toMangaDto(manga), event: toEventDto(event) };
+    return created ? c.json(payload, 201) : c.json(payload, 200);
   },
 );
