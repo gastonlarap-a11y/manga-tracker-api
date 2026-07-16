@@ -1,6 +1,6 @@
 {
   "enabledPlugins": {
-    "api-design@gaston-plugins": true
+    "api-design@dev-plugins": true
   },
   "permissions": {
     "allow": [
@@ -17,6 +17,35 @@
       "Read(**/.env.*)",
       "Read(./src/generated/**)",
       "Read(./**/*.db)"
+    ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "if": "Edit(*.ts)",
+            "command": "jq -r '.tool_input.file_path' | xargs -r bunx biome check --write"
+          },
+          {
+            "type": "command",
+            "if": "Write(*.ts)",
+            "command": "jq -r '.tool_input.file_path' | xargs -r bunx biome check --write"
+          },
+          {
+            "type": "command",
+            "if": "Edit(*.json)",
+            "command": "jq -r '.tool_input.file_path' | xargs -r bunx biome check --write"
+          },
+          {
+            "type": "command",
+            "if": "Write(*.json)",
+            "command": "jq -r '.tool_input.file_path' | xargs -r bunx biome check --write"
+          }
+        ]
+      }
     ]
   }
 }

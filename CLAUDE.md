@@ -7,5 +7,8 @@
   code, or the user corrects the same thing twice.
 - New repeated procedure → propose a `.claude/skills/` entry; new language/area convention →
   a `paths:`-scoped rule in `.claude/rules/` — never more always-loaded lines.
+- New technology appears in the repo (dependency, SDK, platform, infra — e.g. a cloud
+  provider or a new datastore) → offer the matching plugins/skills/rules in the same
+  session; ask first, never add silently.
 - After structural changes (new package, framework migration, tooling swap), re-run
   `/setup-project audit`.

@@ -8,5 +8,5 @@ const required = (name: string): string => {
 
 export const config = {
   databaseUrl: required("DATABASE_URL"),
-  port: Number(Bun.env.PORT ?? 3000),
+  port: Number(Bun.env.PORT ?? 5150),
 } as const;

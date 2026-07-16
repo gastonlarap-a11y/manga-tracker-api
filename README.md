@@ -28,7 +28,7 @@ bun run db:migrate
 
 | Command | What it does |
 |---|---|
-| `bun run dev` | Start the dev server with hot reload on http://localhost:3000 |
+| `bun run dev` | Start the dev server with hot reload on http://127.0.0.1:5150 |
 | `bun test` | Run the test suite (Bun's built-in runner) |
 | `bun run lint` | Lint and check formatting with Biome |
 | `bun run format` | Fix lint issues and format with Biome |
@@ -42,9 +42,19 @@ bun run db:migrate
 - `src/config.ts` — environment configuration (the only env reader)
 - `src/db/` — Prisma client with the libSQL adapter
 - `src/modules/<feature>/` — vertical slices: routes + service + tests per feature
+- `src/lib/` — pure shared utilities (slug normalization, chapter parsing) with tests
 - `prisma/` — schema and migrations
+- `PLAN.md`, `docs/` — implementation roadmap and module specs
 
 ## API documentation
 
-Interactive Swagger UI at [`/docs`](http://localhost:3000/docs); the OpenAPI 3.1 spec is
+Interactive Swagger UI at [`/docs`](http://127.0.0.1:5150/docs); the OpenAPI 3.1 spec is
 generated from the Zod route schemas and served at `/openapi.json`.
+
+## Deployment
+
+Runs permanently on the local Mac as a launchd LaunchAgent
+(`~/Library/LaunchAgents/com.mangatracker.plist`) executing `bun run src/index.ts` from this
+repo — no build step. The production database lives in
+`~/Library/Application Support/MangaTracker/`. Full procedure in `PLAN.md` (Fase 3); the
+repeatable steps are captured in `.claude/skills/deploy/`.
