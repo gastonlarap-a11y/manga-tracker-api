@@ -312,6 +312,12 @@ Content script inyectado bajo demanda. Botón temporal en el popup "Enviar event
 
 ### Fase 6 — Heurística automática
 
+> **Estado (jul 2026): hecha (código); pendiente la verificación manual.** El tracking es
+> opt-in por sitio: botón "Trackear este sitio" en el popup → `permissions.request()` del
+> origen → el background registra `detector.content.ts` para ese origen
+> (`scripting.registerContentScripts`, persistente). Sin capítulo en la URL (páginas
+> catálogo/home) nunca se envía evento; con confianza < 0.7 tampoco (queda para la Fase 7).
+
 Pipeline en el content script:
 1. `GET /api/adapters/:domain` — si hay adapter, aplicarlo.
 2. Si no, correr heurística:
@@ -327,6 +333,10 @@ Componente React en Shadow DOM inyectado por el content script. Estados: "Selecc
 Docs: https://github.com/antonmedv/finder
 
 ### Fase 8 — Detección en SPAs
+
+> **Estado (jul 2026): hecha.** Implementada con el evento `wxt:locationchange` que WXT
+> provee en el contexto del content script (cubre pushState/replaceState/popstate), con
+> debounce de 2 seg y deduplicación por URL ya reportada.
 
 Interceptar `history.pushState`, `history.replaceState`, evento `popstate`. Re-correr detección con debounce.
 
