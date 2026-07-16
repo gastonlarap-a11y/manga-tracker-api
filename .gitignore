@@ -4,6 +4,9 @@ node_modules/
 # generated
 /src/generated/prisma
 
+# dashboard build (copied here by manga-tracker-dashboard `bun run deploy`)
+/public/
+
 # env & secrets
 .env
 .env.*

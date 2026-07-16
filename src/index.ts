@@ -1,5 +1,6 @@
 import { swaggerUI } from "@hono/swagger-ui";
 import { OpenAPIHono } from "@hono/zod-openapi";
+import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
 import { config } from "./config";
 import { adaptersRoutes } from "./modules/adapters/adapters.routes";
@@ -32,6 +33,16 @@ app.route("/api", eventsRoutes);
 app.route("/api", libraryRoutes);
 app.route("/api", adaptersRoutes);
 app.route("/api", duplicatesRoutes);
+
+// Dashboard: static build of manga-tracker-dashboard, copied into ./public by
+// its `bun run deploy`. Only the known SPA routes fall back to index.html, so
+// /api, /docs and /openapi.json keep returning real 404s. Until a build is
+// deployed these paths just 404.
+app.use("/assets/*", serveStatic({ root: "./public" }));
+app.get("/favicon.svg", serveStatic({ path: "./public/favicon.svg" }));
+for (const spaPath of ["/", "/manga/:id", "/duplicates"]) {
+  app.get(spaPath, serveStatic({ path: "./public/index.html" }));
+}
 
 app.doc("/openapi.json", {
   openapi: "3.1.0",
