@@ -9,20 +9,18 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `src/config.ts` — the only place that reads environment variables
 - `src/db/client.ts` — PrismaClient wired to the libSQL adapter
 - `src/modules/<feature>/` — one vertical slice: `*.routes.ts` + `*.service.ts` + `*.test.ts`
+- `src/lib/` — pure shared utilities (slug normalization, chapter parsing) with colocated tests
 - `src/generated/prisma/` — generated Prisma client (never edit; gitignored)
 - `prisma/schema.prisma` — data model; migrations live in `prisma/migrations/`
+- `PLAN.md` + `docs/GUIA-IMPLEMENTACION.md` — roadmap and module specs (events, library, adapters, duplicates)
 
 ## Commands
 - Dev: `bun run dev` · Test: `bun test` · Single test: `bun test <file>`
 - Lint: `bun run lint` · Format: `bun run format` · Typecheck: `bun run typecheck`
 - Prisma client: `bun run db:generate` · Migrations: `bun run db:migrate`
 
-> `typescript@7` is the **native compiler (tsgo)**: it ships no `tsserver.js`, so
-> the old `typescript.tsdk` cannot point VS Code at it. Editor IntelliSense uses the
-> "TypeScript (Native Preview)" extension via `js/ts.experimental.useTsgo` +
-> `js/ts.tsdk.path` (wired in `.vscode/`; these are the `js/ts.*` namespace that
-> replaced the deprecated `typescript.*` settings); `bun run typecheck` runs the
-> same tsgo binary.
+> `typescript@7` is the native compiler (tsgo) — no `tsserver.js`; VS Code IntelliSense uses the
+> "TypeScript (Native Preview)" ext via `js/ts.*` settings (see `.vscode/`), not `typescript.tsdk`.
 
 ## Rules
 - Every route is defined with `createRoute` (zod-openapi) so it appears in `/openapi.json`
@@ -36,8 +34,8 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   event rows are never UPDATEd or DELETEd.
 - One module = one vertical slice under `src/modules/<name>/` (routes + service + tests
   together).
-- Dependency direction: `src/index.ts` → `src/modules/*` → `src/db` / `src/config`; `db` and
-  `config` never import from `modules`.
+- Dependency direction: `src/index.ts` → `src/modules/*` → `src/db` / `src/config` / `src/lib`;
+  `db`, `config` and `lib` never import from `modules` (`lib` holds pure functions only).
 - Only `src/config.ts` reads env vars; everything else receives values from it.
 
 ## Engineering standards
