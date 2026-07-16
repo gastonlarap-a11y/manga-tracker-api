@@ -45,6 +45,7 @@ bun run db:migrate
 - `src/lib/` — pure shared utilities (slug normalization, chapter parsing) with tests
 - `prisma/` — schema and migrations
 - `PLAN.md`, `docs/` — implementation roadmap and module specs
+- `COMO-FUNCIONA.md` — in-depth walkthrough (es): every file explained, plus ops (Swagger, Postman, launchd, data locations)
 
 ## API documentation
 

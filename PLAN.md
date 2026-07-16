@@ -138,10 +138,9 @@ Estado inicial (YA hecho en el repo): dependencias instaladas (`hono`, `@hono/zo
 Estado en `src/index.ts` (toda ruta se define con `createRoute` + Zod, NO `Hono` plano):
 - **Bind a `127.0.0.1`** — hecho (`hostname: "127.0.0.1"` en el `export default`).
 - Puerto fijo `5150` — hecho (default en `src/config.ts`).
-- `hono/cors` — activado; falta completar la allowlist con `chrome-extension://<extension-id>`
-  (cuando exista) y `http://localhost:5150`.
-- Montar los módulos nuevos bajo el prefijo `/api` — pendiente (se hace al crear cada módulo;
-  `health` queda en `/health`).
+- `hono/cors` — allowlist con `http://127.0.0.1:5150` y `http://localhost:5150`; falta solo
+  `chrome-extension://<extension-id>` (cuando exista la extensión).
+- Módulos montados bajo el prefijo `/api` — hecho (`health` queda en `/health`).
 
 **Verificación:** `curl http://localhost:5150/health` responde `{ "status": "ok" }`, y solo desde
 la propia Mac (127.0.0.1).
@@ -149,6 +148,9 @@ la propia Mac (127.0.0.1).
 Docs: https://hono.dev/docs/getting-started/bun · https://hono.dev/docs/middleware/builtin/cors
 
 ### Fase 2 — Modelo de datos + endpoints CRUD
+
+> **Estado (jul 2026): hecha.** Los cuatro slices (`events`, `library`, `adapters`,
+> `duplicates`) están implementados con sus tests, más `src/lib/` (normalize + similarity).
 
 1. Escribir `prisma/schema.prisma` con los tres modelos (ver sección "Modelo de datos").
 2. Configurar `.env` con `DATABASE_URL="file:./data/mangatracker.db"`.
@@ -188,6 +190,11 @@ Docs: https://hono.dev/docs/getting-started/bun · https://hono.dev/docs/middlew
 Docs: https://www.prisma.io/docs/orm/overview/databases/sqlite · https://www.prisma.io/docs/guides/upgrade-prisma-orm/v7
 
 ### Fase 3 — LaunchAgent (backend automático)
+
+> **Estado (jul 2026): hecha.** Instalado y validado (health + kill/auto-restart); pendiente
+> solo el test de reinicio de la Mac. Nota: el binario de bun viene de mise
+> (`~/.local/share/mise/installs/bun/latest/bin/bun`), no de Homebrew. Ver
+> `.claude/skills/deploy/`.
 
 **Este es el paso que resuelve el "no quiero estar levantando nada".** Se hace ahora, no al final.
 

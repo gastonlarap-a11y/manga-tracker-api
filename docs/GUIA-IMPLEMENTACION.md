@@ -22,10 +22,12 @@ El sistema son **tres repos separados**:
 
 ### Estado actual del repo
 
-Ya está armado el esqueleto y funciona: el servidor arranca, tiene documentación automática en
-`/docs`, y la base de datos ya tiene sus tres tablas creadas (`Manga`, `ReadingEvent`,
-`SiteAdapter`). Lo único que existe como ejemplo es el módulo `health` (un "ping" para saber si
-el backend está vivo). **Falta construir todo lo demás.**
+**La Parte 1 (backend) está completa.** El servidor arranca, tiene documentación automática en
+`/docs`, la base de datos tiene sus tres tablas (`Manga`, `ReadingEvent`, `SiteAdapter`), los
+cuatro módulos (`events`, `library`, `adapters`, `duplicates`) están construidos con sus
+pruebas, y el LaunchAgent (Paso 7) está instalado y validado. Los pasos de abajo quedan como
+referencia de cómo funciona cada pieza. **Falta construir la extensión (Parte 2) y el
+dashboard (Parte 3).**
 
 ### Cómo está organizado (y cómo debe quedar)
 
