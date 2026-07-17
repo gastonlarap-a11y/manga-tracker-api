@@ -381,6 +381,13 @@ Interceptar `history.pushState`, `history.replaceState`, evento `popstate`. Re-c
 > filtro, stats, "Seguir leyendo" (`lastSourceUrl`), y borrado de manga
 > (`DELETE /api/mangas/:id`, cascade). `PUT /api/mangas/:id` acepta
 > `{canonicalName?, status?, tags?}`.
+>
+> **Proxy de portadas (jul 2026):** `GET /api/mangas/:id/cover` descarga la portada
+> guardada mandando `Referer: https://<sourceDomain del último evento>/` (retry sin
+> referer, valida `image/*`, `Cache-Control` de 1 día). Motivo: CDNs con anti-hotlink
+> (img2mw.xyz exige el referer de manhwaweb) devuelven 403 al navegador; solo el
+> servidor local puede impersonar el referer correcto. El dashboard carga TODAS las
+> portadas vía este proxy con `?v=<hash(coverUrl)>` como cache-buster.
 
 Proyecto separado:
 ```bash
