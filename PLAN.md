@@ -67,6 +67,9 @@ model Manga {
   id             String         @id @default(uuid())
   canonicalName  String
   normalizedSlug String         @unique
+  coverUrl       String?        // og:image reportada por la extensión con cada evento
+  status         String         @default("reading") // reading | completed | dropped (manual)
+  tags           String         @default("[]")      // tags manuales, JSON de strings
   createdAt      DateTime       @default(now())
   events         ReadingEvent[]
 }
@@ -370,6 +373,14 @@ Interceptar `history.pushState`, `history.replaceState`, evento `popstate`. Re-c
 > `manga-tracker-api/public/` y el backend lo sirve con `serveStatic` de `hono/bun`:
 > `/assets/*` + rutas SPA conocidas (`/`, `/manga/:id`, `/duplicates`) — sin wildcard,
 > así `/api`, `/docs` y `/openapi.json` conservan sus 404 reales.
+>
+> **v2 (jul 2026):** biblioteca como grilla de tarjetas con portada (og:image reportada
+> por la extensión; fallback por gradiente), orden por última actividad, refresco en
+> vivo vía SSE (`GET /api/events/stream` + bus in-process publicado por cada mutación),
+> buscador, pestañas de estado (reading/completed/dropped manuales), tags manuales con
+> filtro, stats, "Seguir leyendo" (`lastSourceUrl`), y borrado de manga
+> (`DELETE /api/mangas/:id`, cascade). `PUT /api/mangas/:id` acepta
+> `{canonicalName?, status?, tags?}`.
 
 Proyecto separado:
 ```bash
