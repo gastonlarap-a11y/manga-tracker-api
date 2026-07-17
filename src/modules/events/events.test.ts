@@ -63,7 +63,7 @@ describe("POST /events", () => {
     expect(await prisma.readingEvent.count()).toBe(2);
   });
 
-  it("always inserts, even when the chapter regresses (server change)", async () => {
+  it("inserts unseen chapters even when the number regresses (server change)", async () => {
     for (const label of ["Cap. 10", "Cap. 11", "Cap. 12", "Cap. 1"]) {
       const res = await postEvent({
         mangaName: "Solo Leveling",
@@ -88,7 +88,7 @@ describe("POST /events", () => {
     expect(body.event.chapterNumber).toBeNull();
   });
 
-  it("returns the existing event for a repeated report of the latest chapter", async () => {
+  it("returns the existing event for a repeated report of a chapter", async () => {
     const first = createEventResponseSchema.parse(
       await (
         await postEvent({
@@ -128,15 +128,13 @@ describe("POST /events", () => {
     expect(await prisma.readingEvent.count()).toBe(1);
   });
 
-  it("still inserts a re-read when another chapter came in between", async () => {
+  it("does not re-insert an old chapter after newer ones were read", async () => {
     for (const label of ["Cap. 49", "Cap. 50"]) {
       await postEvent({
         mangaName: "Nano Machine",
         chapterLabel: label,
         sourceUrl: "https://olympusxyz.com/nano-machine",
       });
-      // Distinct readAt timestamps keep the "latest event" query unambiguous.
-      await Bun.sleep(2);
     }
 
     const res = await postEvent({
@@ -145,11 +143,11 @@ describe("POST /events", () => {
       sourceUrl: "https://olympusxyz.com/nano-machine",
     });
 
-    expect(res.status).toBe(201);
-    expect(await prisma.readingEvent.count()).toBe(3);
+    expect(res.status).toBe(200);
+    expect(await prisma.readingEvent.count()).toBe(2);
   });
 
-  it("inserts the same chapter again once the dedup window has passed", async () => {
+  it("does not re-insert a chapter no matter how old its event is", async () => {
     const first = createEventResponseSchema.parse(
       await (
         await postEvent({
@@ -162,7 +160,7 @@ describe("POST /events", () => {
     // Test-only state crafting: the app itself never updates events.
     await prisma.readingEvent.update({
       where: { id: first.event.id },
-      data: { readAt: new Date(Date.now() - 7 * 60 * 60 * 1000) },
+      data: { readAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
     });
 
     const res = await postEvent({
@@ -171,8 +169,8 @@ describe("POST /events", () => {
       sourceUrl: "https://olympusxyz.com/nano-machine",
     });
 
-    expect(res.status).toBe(201);
-    expect(await prisma.readingEvent.count()).toBe(2);
+    expect(res.status).toBe(200);
+    expect(await prisma.readingEvent.count()).toBe(1);
   });
 
   it("deduplicates unparseable labels by their exact text", async () => {

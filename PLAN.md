@@ -174,9 +174,9 @@ Docs: https://hono.dev/docs/getting-started/bun · https://hono.dev/docs/middlew
    `*.routes.ts` + `*.service.ts` + `*.test.ts`; las rutas solo validan/mapean, la lógica va al
    servicio):
    - **`events/`** → `POST /api/events` — recibe lectura, deduplica `Manga` por `normalizedSlug`,
-     inserta evento (append-only; nunca hace retroceder el progreso). Excepción única: repetir
-     el último capítulo del manga dentro de una ventana de 6 h (ruido de recarga de pestaña)
-     devuelve el evento existente (200) en vez de appendear.
+     inserta evento (append-only; nunca hace retroceder el progreso). Excepción única: un
+     capítulo YA presente en la historia del manga (releídas/recargas) devuelve el evento
+     existente (200) en vez de appendear — solo capítulos nuevos crean filas.
    - **`library/`** → `GET /api/library` (progreso alcanzado = `MAX(chapterNumber)` + última
      actividad), `GET /api/mangas/:id/history`, `PUT /api/mangas/:id` (corrige solo el
      `canonicalName` visible; NO toca `normalizedSlug`).

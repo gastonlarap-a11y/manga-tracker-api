@@ -39,7 +39,7 @@ const postEventRoute = createRoute({
     },
     200: {
       description:
-        "Duplicate report of the latest chapter within the dedup window; the existing event is returned",
+        "Chapter already recorded for this manga; the existing event is returned",
       content: { "application/json": { schema: createEventResponseSchema } },
     },
     400: {

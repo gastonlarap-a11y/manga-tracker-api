@@ -8,19 +8,15 @@ export interface RecordReadingEventInput {
   sourceUrl: string;
 }
 
-// Reloading or reopening a tab re-reports the chapter the reader is already
-// on; within this window that is browser noise, not a re-read.
-const DEDUP_WINDOW_MS = 6 * 60 * 60 * 1000;
-
 /**
  * Records one reading. The server derives slug, domain and chapter number —
  * clients are never trusted with them. Events are append-only: nothing is
- * ever updated or deleted, and a LOWER chapter still inserts (that is exactly
- * the "site changed servers" case; the library projection takes
- * MAX(chapterNumber) over the whole history). The only report that does not
- * append is a consecutive duplicate: when the manga's most recent event is
- * the same chapter within DEDUP_WINDOW_MS, that event is returned instead
- * (created: false).
+ * ever updated or deleted, and a LOWER but unseen chapter still inserts
+ * (that is exactly the "site changed servers" case; the library projection
+ * takes MAX(chapterNumber) over the whole history). The one report that does
+ * not append: a chapter already present anywhere in the manga's history —
+ * re-reading or reloading an existing chapter returns its stored event
+ * (created: false) instead of duplicating it.
  */
 export async function recordReadingEvent(
   input: RecordReadingEventInput,
@@ -35,16 +31,21 @@ export async function recordReadingEvent(
     update: {},
   });
 
-  const latest = await prisma.readingEvent.findFirst({
-    where: { mangaId: manga.id },
+  // Chapter identity: the parsed number when it exists ("Cap. 49" and
+  // "Chapter 49" are the same chapter); the exact label otherwise.
+  const existing = await prisma.readingEvent.findFirst({
+    where:
+      chapterNumber !== null
+        ? { mangaId: manga.id, chapterNumber }
+        : {
+            mangaId: manga.id,
+            chapterNumber: null,
+            chapterLabel: input.chapterLabel,
+          },
     orderBy: { readAt: "desc" },
   });
-  if (
-    latest &&
-    isSameChapter(latest, chapterNumber, input.chapterLabel) &&
-    Date.now() - latest.readAt.getTime() < DEDUP_WINDOW_MS
-  ) {
-    return { manga, event: latest, created: false };
+  if (existing) {
+    return { manga, event: existing, created: false };
   }
 
   const event = await prisma.readingEvent.create({
@@ -58,18 +59,4 @@ export async function recordReadingEvent(
   });
 
   return { manga, event, created: true };
-}
-
-// The parsed number is the chapter's identity when both sides have one
-// ("Cap. 49" and "Chapter 49" are the same chapter); the raw label is the
-// fallback for unparseable chapters ("Especial").
-function isSameChapter(
-  latest: ReadingEvent,
-  chapterNumber: number | null,
-  chapterLabel: string,
-): boolean {
-  if (latest.chapterNumber !== null && chapterNumber !== null) {
-    return latest.chapterNumber === chapterNumber;
-  }
-  return latest.chapterLabel === chapterLabel;
 }
