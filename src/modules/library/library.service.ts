@@ -25,6 +25,8 @@ export interface UpdateMangaInput {
   canonicalName?: string;
   status?: string;
   tags?: string[];
+  // string = manual cover; null = clear (the next reading may refill it)
+  coverUrl?: string | null;
 }
 
 /**
@@ -99,6 +101,7 @@ export async function updateManga(
         : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(input.tags !== undefined ? { tags: JSON.stringify(input.tags) } : {}),
+      ...(input.coverUrl !== undefined ? { coverUrl: input.coverUrl } : {}),
     },
   });
   publishLibraryChanged();

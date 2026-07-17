@@ -57,12 +57,15 @@ const updateMangaBodySchema = z
     canonicalName: z.string().trim().min(1).optional(),
     status: mangaStatusSchema.optional(),
     tags: z.array(z.string().trim().min(1)).optional(),
+    // string = set a manual cover; null = clear it (the next reading refills)
+    coverUrl: z.url().nullable().optional(),
   })
   .refine(
     (body) =>
       body.canonicalName !== undefined ||
       body.status !== undefined ||
-      body.tags !== undefined,
+      body.tags !== undefined ||
+      body.coverUrl !== undefined,
     { message: "At least one field must be provided" },
   )
   .openapi("UpdateMangaBody");

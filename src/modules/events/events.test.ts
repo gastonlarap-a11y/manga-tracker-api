@@ -220,6 +220,27 @@ describe("POST /events", () => {
     expect(await prisma.readingEvent.count()).toBe(1);
   });
 
+  it("never overwrites an existing cover (first cover wins)", async () => {
+    await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+      coverUrl: "https://cdn.example.com/real-cover.jpg",
+    });
+
+    await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 50",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+      coverUrl: "https://olympusxyz.com/other-image.webp",
+    });
+
+    const manga = await prisma.manga.findUniqueOrThrow({
+      where: { normalizedSlug: "nano-machine" },
+    });
+    expect(manga.coverUrl).toBe("https://cdn.example.com/real-cover.jpg");
+  });
+
   it("rejects a missing mangaName with a JSON 400", async () => {
     const res = await postEvent({
       chapterLabel: "Cap. 1",

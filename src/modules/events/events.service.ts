@@ -19,7 +19,8 @@ export interface RecordReadingEventInput {
  * not append: a chapter already present anywhere in the manga's history —
  * re-reading or reloading an existing chapter returns its stored event
  * (created: false). The optional coverUrl (og:image captured by the
- * extension) is persisted on the manga whenever it changes, even on
+ * extension) is persisted only while the manga has none (first cover wins;
+ * manual covers set from the dashboard are never clobbered), even on
  * deduplicated reports.
  */
 export async function recordReadingEvent(
@@ -35,8 +36,11 @@ export async function recordReadingEvent(
     update: {},
   });
 
+  // First cover wins: an already-stored cover (automatic or user-set) is
+  // never overwritten by later readings — clearing it from the dashboard is
+  // the way to let a new one in.
   let coverChanged = false;
-  if (input.coverUrl && manga.coverUrl !== input.coverUrl) {
+  if (input.coverUrl && manga.coverUrl === null) {
     manga = await prisma.manga.update({
       where: { id: manga.id },
       data: { coverUrl: input.coverUrl },

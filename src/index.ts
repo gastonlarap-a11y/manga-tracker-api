@@ -56,5 +56,9 @@ app.get("/docs", swaggerUI({ url: "/openapi.json" }));
 export default {
   port: config.port,
   hostname: "127.0.0.1",
+  // Bun closes idle connections after 10s BY DEFAULT, even mid-stream — that
+  // killed the SSE feed between heartbeats. 120s + a 25s heartbeat keeps the
+  // stream alive with a wide margin.
+  idleTimeout: 120,
   fetch: app.fetch,
 };

@@ -52,7 +52,9 @@ const postEventRoute = createRoute({
   },
 });
 
-const HEARTBEAT_MS = 30_000;
+// Must stay well under the server's idleTimeout (120s in src/index.ts):
+// Bun drops connections that go quiet for longer, even mid-stream.
+const HEARTBEAT_MS = 25_000;
 
 const streamRoute = createRoute({
   method: "get",

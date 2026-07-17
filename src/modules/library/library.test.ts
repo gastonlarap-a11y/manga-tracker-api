@@ -296,6 +296,28 @@ describe("PUT /mangas/{id}", () => {
     expect(stored.tags).toBe('["shonen","piratas"]');
   });
 
+  it("sets and clears the manual cover", async () => {
+    const manga = await seedManga("one-piece", "One Piece", []);
+
+    const set = await libraryRoutes.request(`/mangas/${manga.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ coverUrl: "https://cdn.example.com/cover.jpg" }),
+    });
+    expect(set.status).toBe(200);
+    expect(mangaSchema.parse(await set.json()).coverUrl).toBe(
+      "https://cdn.example.com/cover.jpg",
+    );
+
+    const clear = await libraryRoutes.request(`/mangas/${manga.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ coverUrl: null }),
+    });
+    expect(clear.status).toBe(200);
+    expect(mangaSchema.parse(await clear.json()).coverUrl).toBeNull();
+  });
+
   it("rejects an empty body, an invalid status and blank names", async () => {
     const manga = await seedManga("one-piece", "One Piece", []);
 
