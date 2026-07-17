@@ -330,6 +330,14 @@ Pipeline en el content script:
 
 ### Fase 7 — Overlay de calibración
 
+> **Estado (jul 2026): hecha.** Botón "Calibrar detección" en el popup (sitios
+> trackeados) → overlay en Shadow DOM (`createShadowRootUi` de WXT,
+> `entrypoints/calibration.content/`) → 2 clicks (título y capítulo, selectores con
+> `@medv/finder` validados round-trip) → `POST /api/adapters` (upsert por dominio) →
+> re-detección inmediata en la pestaña. Complemento: el popup ahora muestra el
+> diagnóstico del último intento de detección por pestaña (por qué sí/no se guardó),
+> y los números de URL con más de 4 dígitos jamás se usan como capítulo (ids internos).
+
 Componente React en Shadow DOM inyectado por el content script. Estados: "Seleccioná el título" → "Seleccioná el capítulo" → confirmar. Al clickear, generar CSS selector con `@medv/finder`. `POST /api/adapters`.
 
 Docs: https://github.com/antonmedv/finder
