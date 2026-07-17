@@ -108,6 +108,90 @@ export async function updateManga(
   return manga;
 }
 
+export interface CoverImage {
+  body: ArrayBuffer;
+  contentType: string;
+}
+
+// Some cover CDNs enforce hotlink protection (img2mw.xyz serves manhwaweb
+// covers only with Referer https://manhwaweb.com/), so the browser can never
+// load them directly from the dashboard. Impersonating the reading site's
+// referer is something only this local server can do.
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const COVER_FETCH_TIMEOUT_MS = 10_000;
+
+// Only the call shape matters (Bun's `typeof fetch` also carries preconnect,
+// which would force every test mock to fake it).
+type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Fetches the manga's stored cover on the server, sending the Referer of the
+ * site the manga is read on (its most recent event's sourceDomain). If the
+ * upstream rejects that referer, retries once without any — some CDNs block
+ * foreign referers but accept none. fetchFn is injectable for tests.
+ */
+export async function fetchMangaCover(
+  id: string,
+  fetchFn: FetchLike = fetch,
+): Promise<CoverImage | null> {
+  const manga = await prisma.manga.findUnique({
+    where: { id },
+    include: { events: { orderBy: { readAt: "desc" }, take: 1 } },
+  });
+  if (!manga?.coverUrl) {
+    return null;
+  }
+
+  let coverUrl: URL;
+  try {
+    coverUrl = new URL(manga.coverUrl);
+  } catch {
+    return null;
+  }
+  if (coverUrl.protocol !== "http:" && coverUrl.protocol !== "https:") {
+    return null;
+  }
+
+  const sourceDomain = manga.events[0]?.sourceDomain;
+  const referer = sourceDomain
+    ? `https://${sourceDomain}/`
+    : `${coverUrl.origin}/`;
+
+  const response =
+    (await fetchCover(fetchFn, coverUrl.href, referer)) ??
+    (await fetchCover(fetchFn, coverUrl.href, null));
+  if (!response) {
+    return null;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.startsWith("image/")) {
+    return null;
+  }
+  return { body: await response.arrayBuffer(), contentType };
+}
+
+async function fetchCover(
+  fetchFn: FetchLike,
+  url: string,
+  referer: string | null,
+): Promise<Response | null> {
+  try {
+    const response = await fetchFn(url, {
+      headers: {
+        "User-Agent": BROWSER_USER_AGENT,
+        ...(referer !== null ? { Referer: referer } : {}),
+      },
+      signal: AbortSignal.timeout(COVER_FETCH_TIMEOUT_MS),
+    });
+    return response.ok ? response : null;
+  } catch {
+    // Upstream unreachable or timed out — the route maps null to 404.
+    return null;
+  }
+}
+
 /**
  * Explicit user deletion from the dashboard; events fall with the manga via
  * onDelete: Cascade. This is the one sanctioned way data leaves the log.

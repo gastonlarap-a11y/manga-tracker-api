@@ -8,6 +8,7 @@ import {
   libraryRoutes,
   mangaHistorySchema,
 } from "./library.routes";
+import { fetchMangaCover } from "./library.service";
 
 const libraryResponseSchema = z.array(libraryEntrySchema);
 
@@ -348,6 +349,110 @@ describe("PUT /mangas/{id}", () => {
       body: JSON.stringify({ canonicalName: "Valid" }),
     });
     expect(missing.status).toBe(404);
+  });
+});
+
+describe("fetchMangaCover", () => {
+  const COVER_URL = "https://img2mw.xyz/manhwas/carnicero/cover_123.webp";
+  const COVER_BYTES = new Uint8Array([1, 2, 3, 4]);
+
+  function seedCoveredManga() {
+    return prisma.manga.create({
+      data: {
+        canonicalName: "Carnicero Marcial",
+        normalizedSlug: "carnicero-marcial",
+        coverUrl: COVER_URL,
+        events: {
+          create: [
+            {
+              chapterLabel: "Cap. 36",
+              chapterNumber: 36,
+              sourceUrl: "https://manhwaweb.com/leer/carnicero-36",
+              sourceDomain: "manhwaweb.com",
+              readAt: new Date("2026-07-16T10:00:00.000Z"),
+            },
+          ],
+        },
+      },
+    });
+  }
+
+  function imageResponse(): Response {
+    return new Response(COVER_BYTES, {
+      status: 200,
+      headers: { "content-type": "image/webp" },
+    });
+  }
+
+  it("sends the Referer of the manga's reading site", async () => {
+    const manga = await seedCoveredManga();
+    const calls: { url: string; referer: string | undefined }[] = [];
+    const fetchFn = async (url: string, init?: RequestInit) => {
+      calls.push({
+        url,
+        referer: new Headers(init?.headers).get("referer") ?? undefined,
+      });
+      return imageResponse();
+    };
+
+    const cover = await fetchMangaCover(manga.id, fetchFn);
+
+    expect(calls).toEqual([
+      { url: COVER_URL, referer: "https://manhwaweb.com/" },
+    ]);
+    expect(cover?.contentType).toBe("image/webp");
+    expect(new Uint8Array(cover?.body ?? new ArrayBuffer(0))).toEqual(
+      COVER_BYTES,
+    );
+  });
+
+  it("retries once without Referer when the upstream rejects it", async () => {
+    const manga = await seedCoveredManga();
+    const referers: (string | null)[] = [];
+    const fetchFn = async (_url: string, init?: RequestInit) => {
+      const referer = new Headers(init?.headers).get("referer");
+      referers.push(referer);
+      return referer !== null
+        ? new Response("blocked", { status: 403 })
+        : imageResponse();
+    };
+
+    const cover = await fetchMangaCover(manga.id, fetchFn);
+
+    expect(referers).toEqual(["https://manhwaweb.com/", null]);
+    expect(cover?.contentType).toBe("image/webp");
+  });
+
+  it("returns null when the upstream does not serve an image", async () => {
+    const manga = await seedCoveredManga();
+    const fetchFn = async () =>
+      new Response("<html>Just a moment...</html>", {
+        status: 200,
+        headers: { "content-type": "text/html" },
+      });
+
+    expect(await fetchMangaCover(manga.id, fetchFn)).toBeNull();
+  });
+
+  it("returns null without fetching when there is no manga or no cover", async () => {
+    const uncovered = await seedManga("no-cover", "No Cover", []);
+    const fetchFn = async (): Promise<Response> => {
+      throw new Error("must not be called");
+    };
+
+    expect(await fetchMangaCover(uncovered.id, fetchFn)).toBeNull();
+    expect(await fetchMangaCover("nope", fetchFn)).toBeNull();
+  });
+});
+
+describe("GET /mangas/{id}/cover", () => {
+  it("responds 404 when the manga has no cover", async () => {
+    const manga = await seedManga("no-cover", "No Cover", []);
+
+    const res = await libraryRoutes.request(`/mangas/${manga.id}/cover`);
+
+    expect(res.status).toBe(404);
+    errorSchema.parse(await res.json());
   });
 });
 

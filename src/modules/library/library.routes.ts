@@ -11,6 +11,7 @@ import {
 } from "../../lib/schemas";
 import {
   deleteManga,
+  fetchMangaCover,
   getLibrary,
   getMangaHistory,
   updateManga,
@@ -132,6 +133,26 @@ const putMangaRoute = createRoute({
   },
 });
 
+const getCoverRoute = createRoute({
+  method: "get",
+  path: "/mangas/{id}/cover",
+  tags: ["library"],
+  request: { params: mangaParamsSchema },
+  responses: {
+    200: {
+      description:
+        "The manga's cover image, proxied past hotlink-protected CDNs",
+      content: {
+        "image/*": { schema: z.string().openapi({ format: "binary" }) },
+      },
+    },
+    404: {
+      description: "Manga not found, no cover set, or upstream unavailable",
+      content: { "application/json": { schema: errorSchema } },
+    },
+  },
+});
+
 const deleteMangaRoute = createRoute({
   method: "delete",
   path: "/mangas/{id}",
@@ -192,6 +213,19 @@ export const libraryRoutes = new OpenAPIHono({ defaultHook })
       return c.json({ error: "Manga not found" }, 404);
     }
     return c.json(toMangaDto(manga), 200);
+  })
+  .openapi(getCoverRoute, async (c) => {
+    const { id } = c.req.valid("param");
+    const cover = await fetchMangaCover(id);
+    if (!cover) {
+      return c.json({ error: "Cover not available" }, 404);
+    }
+    return c.body(cover.body, 200, {
+      "Content-Type": cover.contentType,
+      // The dashboard busts this with a ?v= derived from coverUrl, so a long
+      // browser cache is safe even when the user changes the cover.
+      "Cache-Control": "public, max-age=86400",
+    });
   })
   .openapi(deleteMangaRoute, async (c) => {
     const { id } = c.req.valid("param");
