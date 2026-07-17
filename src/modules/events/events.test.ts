@@ -196,6 +196,30 @@ describe("POST /events", () => {
     expect(await prisma.readingEvent.count()).toBe(2);
   });
 
+  it("persists the reported cover on the manga, even on deduped reports", async () => {
+    await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+    });
+
+    const res = await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+      coverUrl: "https://olympusxyz.com/covers/nano-machine.jpg",
+    });
+
+    expect(res.status).toBe(200);
+    const manga = await prisma.manga.findUniqueOrThrow({
+      where: { normalizedSlug: "nano-machine" },
+    });
+    expect(manga.coverUrl).toBe(
+      "https://olympusxyz.com/covers/nano-machine.jpg",
+    );
+    expect(await prisma.readingEvent.count()).toBe(1);
+  });
+
   it("rejects a missing mangaName with a JSON 400", async () => {
     const res = await postEvent({
       chapterLabel: "Cap. 1",

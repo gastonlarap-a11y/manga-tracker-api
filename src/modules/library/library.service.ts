@@ -1,5 +1,6 @@
 import { prisma } from "../../db/client";
 import type { Manga, ReadingEvent } from "../../generated/prisma/client";
+import { publishLibraryChanged } from "../events/events.bus";
 
 export interface LibraryFilters {
   domain?: string;
@@ -10,10 +11,20 @@ export interface LibraryProjection {
   id: string;
   canonicalName: string;
   normalizedSlug: string;
+  coverUrl: string | null;
+  status: string;
+  tags: string;
   reachedChapter: { number: number; label: string } | null;
   lastActivity: { readAt: Date; chapterLabel: string } | null;
+  lastSourceUrl: string | null;
   readCount: number;
   sourceDomains: string[];
+}
+
+export interface UpdateMangaInput {
+  canonicalName?: string;
+  status?: string;
+  tags?: string[];
 }
 
 /**
@@ -21,6 +32,7 @@ export interface LibraryProjection {
  * - reachedChapter = the highest parsed chapter across the WHOLE history
  *   (real progress; a low-chapter event after a server change never lowers it)
  * - lastActivity = the most recent event, regardless of its chapter
+ * Entries come back most-recently-read first (mangas without events last).
  * Volume is tiny (tens of events/day), so loading events per manga and
  * projecting in memory is simpler and strictly more correct than groupBy
  * (which cannot return the label of the max row).
@@ -42,7 +54,13 @@ export async function getLibrary(
     orderBy: { createdAt: "asc" },
   });
 
-  return mangas.map(project);
+  return mangas
+    .map(project)
+    .sort(
+      (a, b) =>
+        (b.lastActivity?.readAt.getTime() ?? 0) -
+        (a.lastActivity?.readAt.getTime() ?? 0),
+    );
 }
 
 export async function getMangaHistory(
@@ -60,19 +78,45 @@ export async function getMangaHistory(
 }
 
 /**
- * Fixes only the display name. normalizedSlug is deliberately untouched: it
- * is the dedup key, and changing it would either break future matching or
- * collide with another manga.
+ * Manual corrections from the dashboard: display name, reading status and
+ * tags. normalizedSlug is deliberately untouched: it is the dedup key, and
+ * changing it would either break future matching or collide with another
+ * manga.
  */
-export async function updateCanonicalName(
+export async function updateManga(
   id: string,
-  canonicalName: string,
+  input: UpdateMangaInput,
 ): Promise<Manga | null> {
   const existing = await prisma.manga.findUnique({ where: { id } });
   if (!existing) {
     return null;
   }
-  return prisma.manga.update({ where: { id }, data: { canonicalName } });
+  const manga = await prisma.manga.update({
+    where: { id },
+    data: {
+      ...(input.canonicalName !== undefined
+        ? { canonicalName: input.canonicalName }
+        : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.tags !== undefined ? { tags: JSON.stringify(input.tags) } : {}),
+    },
+  });
+  publishLibraryChanged();
+  return manga;
+}
+
+/**
+ * Explicit user deletion from the dashboard; events fall with the manga via
+ * onDelete: Cascade. This is the one sanctioned way data leaves the log.
+ */
+export async function deleteManga(id: string): Promise<boolean> {
+  const existing = await prisma.manga.findUnique({ where: { id } });
+  if (!existing) {
+    return false;
+  }
+  await prisma.manga.delete({ where: { id } });
+  publishLibraryChanged();
+  return true;
 }
 
 function project(manga: Manga & { events: ReadingEvent[] }): LibraryProjection {
@@ -96,10 +140,14 @@ function project(manga: Manga & { events: ReadingEvent[] }): LibraryProjection {
     id: manga.id,
     canonicalName: manga.canonicalName,
     normalizedSlug: manga.normalizedSlug,
+    coverUrl: manga.coverUrl,
+    status: manga.status,
+    tags: manga.tags,
     reachedChapter,
     lastActivity: latest
       ? { readAt: latest.readAt, chapterLabel: latest.chapterLabel }
       : null,
+    lastSourceUrl: latest?.sourceUrl ?? null,
     readCount: manga.events.length,
     sourceDomains: [
       ...new Set(manga.events.map((event) => event.sourceDomain)),

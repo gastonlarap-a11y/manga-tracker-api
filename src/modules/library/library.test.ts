@@ -99,6 +99,63 @@ describe("GET /library", () => {
     expect(entries[0]?.lastActivity?.chapterLabel).toBe("Extra Omake");
   });
 
+  it("orders entries by most recent activity first", async () => {
+    await seedManga("older", "Older Manga", [
+      {
+        label: "Cap. 1",
+        number: 1,
+        domain: "olympusxyz.com",
+        readAt: "2026-07-01T10:00:00.000Z",
+      },
+    ]);
+    await seedManga("newer", "Newer Manga", [
+      {
+        label: "Cap. 2",
+        number: 2,
+        domain: "olympusxyz.com",
+        readAt: "2026-07-05T10:00:00.000Z",
+      },
+    ]);
+    await seedManga("no-events", "Empty Manga", []);
+
+    const entries = libraryResponseSchema.parse(
+      await (await libraryRoutes.request("/library")).json(),
+    );
+
+    expect(entries.map((entry) => entry.normalizedSlug)).toEqual([
+      "newer",
+      "older",
+      "no-events",
+    ]);
+  });
+
+  it("exposes the last source url for continue-reading", async () => {
+    await seedManga("solo-leveling", "Solo Leveling", [
+      {
+        label: "Cap. 10",
+        number: 10,
+        domain: "olympusxyz.com",
+        readAt: "2026-07-01T10:00:00.000Z",
+      },
+      {
+        label: "Cap. 12",
+        number: 12,
+        domain: "newserver.net",
+        readAt: "2026-07-02T10:00:00.000Z",
+      },
+    ]);
+
+    const entries = libraryResponseSchema.parse(
+      await (await libraryRoutes.request("/library")).json(),
+    );
+
+    expect(entries[0]?.lastSourceUrl).toBe(
+      "https://newserver.net/solo-leveling",
+    );
+    expect(entries[0]?.status).toBe("reading");
+    expect(entries[0]?.tags).toEqual([]);
+  });
+
   it("filters by domain", async () => {
     await seedManga("solo-leveling", "Solo Leveling", [
       {
@@ -214,8 +271,47 @@ describe("PUT /mangas/{id}", () => {
     expect(stored.normalizedSlug).toBe("solo-leveling");
   });
 
-  it("rejects a blank name with 400 and unknown ids with 404", async () => {
+  it("updates status and tags without touching the name", async () => {
     const manga = await seedManga("one-piece", "One Piece", []);
+
+    const res = await libraryRoutes.request(`/mangas/${manga.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        status: "completed",
+        tags: ["shonen", "piratas"],
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const updated = mangaSchema.parse(await res.json());
+    expect(updated.status).toBe("completed");
+    expect(updated.tags).toEqual(["shonen", "piratas"]);
+    expect(updated.canonicalName).toBe("One Piece");
+
+    const stored = await prisma.manga.findUniqueOrThrow({
+      where: { id: manga.id },
+    });
+    expect(stored.status).toBe("completed");
+    expect(stored.tags).toBe('["shonen","piratas"]');
+  });
+
+  it("rejects an empty body, an invalid status and blank names", async () => {
+    const manga = await seedManga("one-piece", "One Piece", []);
+
+    const empty = await libraryRoutes.request(`/mangas/${manga.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(empty.status).toBe(400);
+
+    const badStatus = await libraryRoutes.request(`/mangas/${manga.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "archived" }),
+    });
+    expect(badStatus.status).toBe(400);
 
     const blank = await libraryRoutes.request(`/mangas/${manga.id}`, {
       method: "PUT",
@@ -230,5 +326,33 @@ describe("PUT /mangas/{id}", () => {
       body: JSON.stringify({ canonicalName: "Valid" }),
     });
     expect(missing.status).toBe(404);
+  });
+});
+
+describe("DELETE /mangas/{id}", () => {
+  it("deletes the manga and its whole history", async () => {
+    const manga = await seedManga("junk", "Junk Manga", [
+      {
+        label: "Cap. 1",
+        number: 1,
+        domain: "olympusxyz.com",
+        readAt: "2026-07-01T10:00:00.000Z",
+      },
+    ]);
+
+    const res = await libraryRoutes.request(`/mangas/${manga.id}`, {
+      method: "DELETE",
+    });
+
+    expect(res.status).toBe(204);
+    expect(await prisma.manga.count()).toBe(0);
+    expect(await prisma.readingEvent.count()).toBe(0);
+  });
+
+  it("responds 404 for an unknown id", async () => {
+    const res = await libraryRoutes.request("/mangas/nope", {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(404);
   });
 });

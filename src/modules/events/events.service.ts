@@ -1,11 +1,13 @@
 import { prisma } from "../../db/client";
 import type { Manga, ReadingEvent } from "../../generated/prisma/client";
 import { normalizeSlug, parseChapterNumber } from "../../lib/normalize";
+import { publishLibraryChanged } from "./events.bus";
 
 export interface RecordReadingEventInput {
   mangaName: string;
   chapterLabel: string;
   sourceUrl: string;
+  coverUrl?: string;
 }
 
 /**
@@ -16,7 +18,9 @@ export interface RecordReadingEventInput {
  * takes MAX(chapterNumber) over the whole history). The one report that does
  * not append: a chapter already present anywhere in the manga's history —
  * re-reading or reloading an existing chapter returns its stored event
- * (created: false) instead of duplicating it.
+ * (created: false). The optional coverUrl (og:image captured by the
+ * extension) is persisted on the manga whenever it changes, even on
+ * deduplicated reports.
  */
 export async function recordReadingEvent(
   input: RecordReadingEventInput,
@@ -25,11 +29,20 @@ export async function recordReadingEvent(
   const sourceDomain = new URL(input.sourceUrl).hostname;
   const chapterNumber = parseChapterNumber(input.chapterLabel);
 
-  const manga = await prisma.manga.upsert({
+  let manga = await prisma.manga.upsert({
     where: { normalizedSlug },
     create: { canonicalName: input.mangaName, normalizedSlug },
     update: {},
   });
+
+  let coverChanged = false;
+  if (input.coverUrl && manga.coverUrl !== input.coverUrl) {
+    manga = await prisma.manga.update({
+      where: { id: manga.id },
+      data: { coverUrl: input.coverUrl },
+    });
+    coverChanged = true;
+  }
 
   // Chapter identity: the parsed number when it exists ("Cap. 49" and
   // "Chapter 49" are the same chapter); the exact label otherwise.
@@ -45,6 +58,9 @@ export async function recordReadingEvent(
     orderBy: { readAt: "desc" },
   });
   if (existing) {
+    if (coverChanged) {
+      publishLibraryChanged();
+    }
     return { manga, event: existing, created: false };
   }
 
@@ -58,5 +74,6 @@ export async function recordReadingEvent(
     },
   });
 
+  publishLibraryChanged();
   return { manga, event, created: true };
 }
