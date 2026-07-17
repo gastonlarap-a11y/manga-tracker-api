@@ -1,5 +1,6 @@
 import { prisma } from "../../db/client";
 import type { Manga, ReadingEvent } from "../../generated/prisma/client";
+import { publishLibraryChanged } from "../events/events.bus";
 
 export interface LibraryFilters {
   domain?: string;
@@ -10,10 +11,22 @@ export interface LibraryProjection {
   id: string;
   canonicalName: string;
   normalizedSlug: string;
+  coverUrl: string | null;
+  status: string;
+  tags: string;
   reachedChapter: { number: number; label: string } | null;
   lastActivity: { readAt: Date; chapterLabel: string } | null;
+  lastSourceUrl: string | null;
   readCount: number;
   sourceDomains: string[];
+}
+
+export interface UpdateMangaInput {
+  canonicalName?: string;
+  status?: string;
+  tags?: string[];
+  // string = manual cover; null = clear (the next reading may refill it)
+  coverUrl?: string | null;
 }
 
 /**
@@ -21,6 +34,7 @@ export interface LibraryProjection {
  * - reachedChapter = the highest parsed chapter across the WHOLE history
  *   (real progress; a low-chapter event after a server change never lowers it)
  * - lastActivity = the most recent event, regardless of its chapter
+ * Entries come back most-recently-read first (mangas without events last).
  * Volume is tiny (tens of events/day), so loading events per manga and
  * projecting in memory is simpler and strictly more correct than groupBy
  * (which cannot return the label of the max row).
@@ -42,7 +56,13 @@ export async function getLibrary(
     orderBy: { createdAt: "asc" },
   });
 
-  return mangas.map(project);
+  return mangas
+    .map(project)
+    .sort(
+      (a, b) =>
+        (b.lastActivity?.readAt.getTime() ?? 0) -
+        (a.lastActivity?.readAt.getTime() ?? 0),
+    );
 }
 
 export async function getMangaHistory(
@@ -60,19 +80,130 @@ export async function getMangaHistory(
 }
 
 /**
- * Fixes only the display name. normalizedSlug is deliberately untouched: it
- * is the dedup key, and changing it would either break future matching or
- * collide with another manga.
+ * Manual corrections from the dashboard: display name, reading status and
+ * tags. normalizedSlug is deliberately untouched: it is the dedup key, and
+ * changing it would either break future matching or collide with another
+ * manga.
  */
-export async function updateCanonicalName(
+export async function updateManga(
   id: string,
-  canonicalName: string,
+  input: UpdateMangaInput,
 ): Promise<Manga | null> {
   const existing = await prisma.manga.findUnique({ where: { id } });
   if (!existing) {
     return null;
   }
-  return prisma.manga.update({ where: { id }, data: { canonicalName } });
+  const manga = await prisma.manga.update({
+    where: { id },
+    data: {
+      ...(input.canonicalName !== undefined
+        ? { canonicalName: input.canonicalName }
+        : {}),
+      ...(input.status !== undefined ? { status: input.status } : {}),
+      ...(input.tags !== undefined ? { tags: JSON.stringify(input.tags) } : {}),
+      ...(input.coverUrl !== undefined ? { coverUrl: input.coverUrl } : {}),
+    },
+  });
+  publishLibraryChanged();
+  return manga;
+}
+
+export interface CoverImage {
+  body: ArrayBuffer;
+  contentType: string;
+}
+
+// Some cover CDNs enforce hotlink protection (img2mw.xyz serves manhwaweb
+// covers only with Referer https://manhwaweb.com/), so the browser can never
+// load them directly from the dashboard. Impersonating the reading site's
+// referer is something only this local server can do.
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const COVER_FETCH_TIMEOUT_MS = 10_000;
+
+// Only the call shape matters (Bun's `typeof fetch` also carries preconnect,
+// which would force every test mock to fake it).
+type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
+
+/**
+ * Fetches the manga's stored cover on the server, sending the Referer of the
+ * site the manga is read on (its most recent event's sourceDomain). If the
+ * upstream rejects that referer, retries once without any — some CDNs block
+ * foreign referers but accept none. fetchFn is injectable for tests.
+ */
+export async function fetchMangaCover(
+  id: string,
+  fetchFn: FetchLike = fetch,
+): Promise<CoverImage | null> {
+  const manga = await prisma.manga.findUnique({
+    where: { id },
+    include: { events: { orderBy: { readAt: "desc" }, take: 1 } },
+  });
+  if (!manga?.coverUrl) {
+    return null;
+  }
+
+  let coverUrl: URL;
+  try {
+    coverUrl = new URL(manga.coverUrl);
+  } catch {
+    return null;
+  }
+  if (coverUrl.protocol !== "http:" && coverUrl.protocol !== "https:") {
+    return null;
+  }
+
+  const sourceDomain = manga.events[0]?.sourceDomain;
+  const referer = sourceDomain
+    ? `https://${sourceDomain}/`
+    : `${coverUrl.origin}/`;
+
+  const response =
+    (await fetchCover(fetchFn, coverUrl.href, referer)) ??
+    (await fetchCover(fetchFn, coverUrl.href, null));
+  if (!response) {
+    return null;
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.startsWith("image/")) {
+    return null;
+  }
+  return { body: await response.arrayBuffer(), contentType };
+}
+
+async function fetchCover(
+  fetchFn: FetchLike,
+  url: string,
+  referer: string | null,
+): Promise<Response | null> {
+  try {
+    const response = await fetchFn(url, {
+      headers: {
+        "User-Agent": BROWSER_USER_AGENT,
+        ...(referer !== null ? { Referer: referer } : {}),
+      },
+      signal: AbortSignal.timeout(COVER_FETCH_TIMEOUT_MS),
+    });
+    return response.ok ? response : null;
+  } catch {
+    // Upstream unreachable or timed out — the route maps null to 404.
+    return null;
+  }
+}
+
+/**
+ * Explicit user deletion from the dashboard; events fall with the manga via
+ * onDelete: Cascade. This is the one sanctioned way data leaves the log.
+ */
+export async function deleteManga(id: string): Promise<boolean> {
+  const existing = await prisma.manga.findUnique({ where: { id } });
+  if (!existing) {
+    return false;
+  }
+  await prisma.manga.delete({ where: { id } });
+  publishLibraryChanged();
+  return true;
 }
 
 function project(manga: Manga & { events: ReadingEvent[] }): LibraryProjection {
@@ -96,10 +227,14 @@ function project(manga: Manga & { events: ReadingEvent[] }): LibraryProjection {
     id: manga.id,
     canonicalName: manga.canonicalName,
     normalizedSlug: manga.normalizedSlug,
+    coverUrl: manga.coverUrl,
+    status: manga.status,
+    tags: manga.tags,
     reachedChapter,
     lastActivity: latest
       ? { readAt: latest.readAt, chapterLabel: latest.chapterLabel }
       : null,
+    lastSourceUrl: latest?.sourceUrl ?? null,
     readCount: manga.events.length,
     sourceDomains: [
       ...new Set(manga.events.map((event) => event.sourceDomain)),

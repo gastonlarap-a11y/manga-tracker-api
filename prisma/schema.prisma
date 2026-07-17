@@ -19,6 +19,12 @@ model Manga {
   canonicalName  String
   // Unique identifier mapped via normalizeSlug() to prevent duplicates
   normalizedSlug String   @unique
+  // Cover image reported by the extension (og:image of a chapter page)
+  coverUrl       String?
+  // Manual reading status: "reading" | "completed" | "dropped"
+  status         String   @default("reading")
+  // Manual tags as a JSON array of strings (SQLite has no array columns)
+  tags           String   @default("[]")
   createdAt      DateTime @default(now())
 
   events ReadingEvent[]

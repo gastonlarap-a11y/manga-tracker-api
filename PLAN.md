@@ -30,7 +30,7 @@ Herramienta local en macOS que trackea automáticamente qué manga/manhwa se lee
 | SQLite | 3.46+ | DB (archivo local) |
 | React | 19 | Extension popup + dashboard |
 | Vite | 8 | Bundler (con Rolldown) |
-| CRXJS | 2.6.1 | Vite plugin para Chrome extensions |
+| WXT | 0.20.x | Framework para la extensión (CLI con soporte Bun, manifest generado, HMR) |
 | Manifest V3 | — | Único soportado por Chrome desde ago 2026 |
 
 ## Arquitectura
@@ -67,6 +67,9 @@ model Manga {
   id             String         @id @default(uuid())
   canonicalName  String
   normalizedSlug String         @unique
+  coverUrl       String?        // og:image reportada por la extensión con cada evento
+  status         String         @default("reading") // reading | completed | dropped (manual)
+  tags           String         @default("[]")      // tags manuales, JSON de strings
   createdAt      DateTime       @default(now())
   events         ReadingEvent[]
 }
@@ -138,8 +141,8 @@ Estado inicial (YA hecho en el repo): dependencias instaladas (`hono`, `@hono/zo
 Estado en `src/index.ts` (toda ruta se define con `createRoute` + Zod, NO `Hono` plano):
 - **Bind a `127.0.0.1`** — hecho (`hostname: "127.0.0.1"` en el `export default`).
 - Puerto fijo `5150` — hecho (default en `src/config.ts`).
-- `hono/cors` — allowlist con `http://127.0.0.1:5150` y `http://localhost:5150`; falta solo
-  `chrome-extension://<extension-id>` (cuando exista la extensión).
+- `hono/cors` — allowlist con `http://127.0.0.1:5150`, `http://localhost:5150` y
+  `chrome-extension://cfjiinlnepkmlaafdclmlpjbmpofplop` (id fijo de la extensión, ver Fase 4).
 - Módulos montados bajo el prefijo `/api` — hecho (`health` queda en `/health`).
 
 **Verificación:** `curl http://localhost:5150/health` responde `{ "status": "ok" }`, y solo desde
@@ -174,7 +177,9 @@ Docs: https://hono.dev/docs/getting-started/bun · https://hono.dev/docs/middlew
    `*.routes.ts` + `*.service.ts` + `*.test.ts`; las rutas solo validan/mapean, la lógica va al
    servicio):
    - **`events/`** → `POST /api/events` — recibe lectura, deduplica `Manga` por `normalizedSlug`,
-     inserta evento (append-only; nunca hace retroceder el progreso).
+     inserta evento (append-only; nunca hace retroceder el progreso). Excepción única: un
+     capítulo YA presente en la historia del manga (releídas/recargas) devuelve el evento
+     existente (200) en vez de appendear — solo capítulos nuevos crean filas.
    - **`library/`** → `GET /api/library` (progreso alcanzado = `MAX(chapterNumber)` + última
      actividad), `GET /api/mangas/:id/history`, `PUT /api/mangas/:id` (corrige solo el
      `canonicalName` visible; NO toca `normalizedSlug`).
@@ -272,38 +277,51 @@ Docs: https://www.launchd.info/ · https://bun.sh/docs/runtime/http/server
 
 ### Fase 4 — Extensión esqueleto (MV3)
 
+> **Estado (jul 2026): hecha (código); pendiente la verificación manual en navegadores.**
+> **Decisión: WXT en lugar de CRXJS** — a jul 2026 WXT tiene CLI con soporte Bun nativo,
+> manifest auto-generado desde `wxt.config.ts`, entrypoints por archivo y mejor HMR; CRXJS
+> exige scaffolding vía npm y manifest manual. Plasmo está en modo mantenimiento.
+
 Nuevo proyecto separado:
 ```bash
 cd /Users/gaston/Documents/Git
-bunx create-crxjs manga-tracker-extension --template react-ts
-cd manga-tracker-extension
+bunx wxt@latest init manga-tracker-extension -t react --pm bun
+cd manga-tracker-extension && bun install
 ```
 
-`manifest.json`:
-```json
-{
-  "manifest_version": 3,
-  "name": "Manga Tracker",
-  "version": "0.1.0",
-  "permissions": ["storage", "activeTab", "scripting"],
-  "optional_host_permissions": ["https://*/*", "http://*/*"],
-  "host_permissions": ["http://localhost:5150/*"],
-  "background": { "service_worker": "src/background/index.ts", "type": "module" },
-  "action": { "default_popup": "src/popup/index.html" }
-}
-```
+El manifest NO se escribe a mano: se define en `wxt.config.ts` (clave `manifest`) y WXT lo
+genera en `.output/<target>/manifest.json`. Configurado:
 
-Popup React que hace ping a `GET /health` y muestra estado. Cargar como unpacked en Brave y Chrome. Capturar el extension-id resultante y ajustar CORS del backend.
+- `permissions: ["storage", "activeTab", "scripting"]`
+- `host_permissions: ["http://localhost:5150/*"]`
+- `optional_host_permissions: ["https://*/*", "http://*/*"]`
+- `key` fija (pubkey RSA; el `.pem` queda gitignorado) → extension-id estable
+  `cfjiinlnepkmlaafdclmlpjbmpofplop`, ya agregado al CORS del backend sin esperar la carga
+  manual.
+
+Popup React que hace ping a `GET /health` y muestra estado. Cargar como unpacked
+(`.output/chrome-mv3-dev/` en dev) en Brave y Chrome; el id debe coincidir con el calculado.
 
 **Verificación:** popup en ambos navegadores muestra "Conectado".
 
-Docs: https://crxjs.dev/vite-plugin · https://developer.chrome.com/docs/extensions/mv3/intro
+Docs: https://wxt.dev/guide/installation.html · https://developer.chrome.com/docs/extensions/mv3/intro
 
 ### Fase 5 — Handshake end-to-end con botón manual
+
+> **Estado (jul 2026): hecha (código); pendiente la verificación manual end-to-end.**
+> Implementado: content script con `registration: "runtime"` (inyectado bajo demanda con
+> `activeTab` + `scripting`, devuelve `{title, url}` de la página) y botón "Enviar evento
+> test" en el popup que arma el payload con datos reales de la pestaña activa.
 
 Content script inyectado bajo demanda. Botón temporal en el popup "Enviar evento test" que envía un payload dummy. Verificar que llega, se guarda, y que un evento enviado desde Brave se ve al consultar `GET /api/library` desde Chrome (mismo backend).
 
 ### Fase 6 — Heurística automática
+
+> **Estado (jul 2026): hecha (código); pendiente la verificación manual.** El tracking es
+> opt-in por sitio: botón "Trackear este sitio" en el popup → `permissions.request()` del
+> origen → el background registra `detector.content.ts` para ese origen
+> (`scripting.registerContentScripts`, persistente). Sin capítulo en la URL (páginas
+> catálogo/home) nunca se envía evento; con confianza < 0.7 tampoco (queda para la Fase 7).
 
 Pipeline en el content script:
 1. `GET /api/adapters/:domain` — si hay adapter, aplicarlo.
@@ -315,11 +333,23 @@ Pipeline en el content script:
 
 ### Fase 7 — Overlay de calibración
 
+> **Estado (jul 2026): hecha.** Botón "Calibrar detección" en el popup (sitios
+> trackeados) → overlay en Shadow DOM (`createShadowRootUi` de WXT,
+> `entrypoints/calibration.content/`) → 2 clicks (título y capítulo, selectores con
+> `@medv/finder` validados round-trip) → `POST /api/adapters` (upsert por dominio) →
+> re-detección inmediata en la pestaña. Complemento: el popup ahora muestra el
+> diagnóstico del último intento de detección por pestaña (por qué sí/no se guardó),
+> y los números de URL con más de 4 dígitos jamás se usan como capítulo (ids internos).
+
 Componente React en Shadow DOM inyectado por el content script. Estados: "Seleccioná el título" → "Seleccioná el capítulo" → confirmar. Al clickear, generar CSS selector con `@medv/finder`. `POST /api/adapters`.
 
 Docs: https://github.com/antonmedv/finder
 
 ### Fase 8 — Detección en SPAs
+
+> **Estado (jul 2026): hecha.** Implementada con el evento `wxt:locationchange` que WXT
+> provee en el contexto del content script (cubre pushState/replaceState/popstate), con
+> debounce de 2 seg y deduplicación por URL ya reportada.
 
 Interceptar `history.pushState`, `history.replaceState`, evento `popstate`. Re-correr detección con debounce.
 
@@ -335,6 +365,29 @@ Interceptar `history.pushState`, `history.replaceState`, evento `popstate`. Re-c
 > hará con una tabla de alias (canonical) resuelta en la proyección, sin mover events.
 
 ### Fase 10 — Dashboard
+
+> **Estado (jul 2026): hecha.** Repo `manga-tracker-dashboard` creado (React 19 + Jotai +
+> Vite 8 + react-router 8; tooling Bun/Biome/tsgo/vitest espejo de la extensión). Las tres
+> vistas implementadas con tests (22), incluida la corrección manual de nombres
+> (`PUT /api/mangas/:id`, Fase 9). `bun run deploy` copia `dist/` a
+> `manga-tracker-api/public/` y el backend lo sirve con `serveStatic` de `hono/bun`:
+> `/assets/*` + rutas SPA conocidas (`/`, `/manga/:id`, `/duplicates`) — sin wildcard,
+> así `/api`, `/docs` y `/openapi.json` conservan sus 404 reales.
+>
+> **v2 (jul 2026):** biblioteca como grilla de tarjetas con portada (og:image reportada
+> por la extensión; fallback por gradiente), orden por última actividad, refresco en
+> vivo vía SSE (`GET /api/events/stream` + bus in-process publicado por cada mutación),
+> buscador, pestañas de estado (reading/completed/dropped manuales), tags manuales con
+> filtro, stats, "Seguir leyendo" (`lastSourceUrl`), y borrado de manga
+> (`DELETE /api/mangas/:id`, cascade). `PUT /api/mangas/:id` acepta
+> `{canonicalName?, status?, tags?}`.
+>
+> **Proxy de portadas (jul 2026):** `GET /api/mangas/:id/cover` descarga la portada
+> guardada mandando `Referer: https://<sourceDomain del último evento>/` (retry sin
+> referer, valida `image/*`, `Cache-Control` de 1 día). Motivo: CDNs con anti-hotlink
+> (img2mw.xyz exige el referer de manhwaweb) devuelven 403 al navegador; solo el
+> servidor local puede impersonar el referer correcto. El dashboard carga TODAS las
+> portadas vía este proxy con `?v=<hash(coverUrl)>` como cache-buster.
 
 Proyecto separado:
 ```bash
@@ -384,6 +437,6 @@ Vistas:
 - Prisma + Bun SQLite: https://www.prisma.io/docs/orm/overview/databases/sqlite
 - Chrome Extensions MV3: https://developer.chrome.com/docs/extensions
 - Chrome Local Network Access: https://developer.chrome.com/blog/local-network-access
-- Vite + CRXJS: https://crxjs.dev/vite-plugin
+- WXT: https://wxt.dev
 - React 19: https://react.dev
 - launchd: https://www.launchd.info

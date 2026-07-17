@@ -63,7 +63,7 @@ describe("POST /events", () => {
     expect(await prisma.readingEvent.count()).toBe(2);
   });
 
-  it("always inserts, even when the chapter regresses (server change)", async () => {
+  it("inserts unseen chapters even when the number regresses (server change)", async () => {
     for (const label of ["Cap. 10", "Cap. 11", "Cap. 12", "Cap. 1"]) {
       const res = await postEvent({
         mangaName: "Solo Leveling",
@@ -86,6 +86,159 @@ describe("POST /events", () => {
     expect(res.status).toBe(201);
     const body = createEventResponseSchema.parse(await res.json());
     expect(body.event.chapterNumber).toBeNull();
+  });
+
+  it("returns the existing event for a repeated report of a chapter", async () => {
+    const first = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Nano Machine",
+          chapterLabel: "Cap. 49",
+          sourceUrl: "https://olympusxyz.com/capitulo/900001/",
+        })
+      ).json(),
+    );
+
+    const res = await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://olympusxyz.com/capitulo/900001/",
+    });
+
+    expect(res.status).toBe(200);
+    const second = createEventResponseSchema.parse(await res.json());
+    expect(second.event.id).toBe(first.event.id);
+    expect(await prisma.readingEvent.count()).toBe(1);
+  });
+
+  it("deduplicates by parsed chapter number, not by the raw label", async () => {
+    await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Chapter 49",
+      sourceUrl: "https://siteone.com/nano-machine/49",
+    });
+
+    const res = await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://sitetwo.net/nano-machine/cap-49",
+    });
+
+    expect(res.status).toBe(200);
+    expect(await prisma.readingEvent.count()).toBe(1);
+  });
+
+  it("does not re-insert an old chapter after newer ones were read", async () => {
+    for (const label of ["Cap. 49", "Cap. 50"]) {
+      await postEvent({
+        mangaName: "Nano Machine",
+        chapterLabel: label,
+        sourceUrl: "https://olympusxyz.com/nano-machine",
+      });
+    }
+
+    const res = await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+    });
+
+    expect(res.status).toBe(200);
+    expect(await prisma.readingEvent.count()).toBe(2);
+  });
+
+  it("does not re-insert a chapter no matter how old its event is", async () => {
+    const first = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Nano Machine",
+          chapterLabel: "Cap. 49",
+          sourceUrl: "https://olympusxyz.com/nano-machine",
+        })
+      ).json(),
+    );
+    // Test-only state crafting: the app itself never updates events.
+    await prisma.readingEvent.update({
+      where: { id: first.event.id },
+      data: { readAt: new Date(Date.now() - 90 * 24 * 60 * 60 * 1000) },
+    });
+
+    const res = await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+    });
+
+    expect(res.status).toBe(200);
+    expect(await prisma.readingEvent.count()).toBe(1);
+  });
+
+  it("deduplicates unparseable labels by their exact text", async () => {
+    await postEvent({
+      mangaName: "Berserk",
+      chapterLabel: "Extra Omake",
+      sourceUrl: "https://olympusxyz.com/berserk/extra",
+    });
+
+    const repeated = await postEvent({
+      mangaName: "Berserk",
+      chapterLabel: "Extra Omake",
+      sourceUrl: "https://olympusxyz.com/berserk/extra",
+    });
+    expect(repeated.status).toBe(200);
+
+    const different = await postEvent({
+      mangaName: "Berserk",
+      chapterLabel: "Otro Extra",
+      sourceUrl: "https://olympusxyz.com/berserk/otro-extra",
+    });
+    expect(different.status).toBe(201);
+    expect(await prisma.readingEvent.count()).toBe(2);
+  });
+
+  it("persists the reported cover on the manga, even on deduped reports", async () => {
+    await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+    });
+
+    const res = await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+      coverUrl: "https://olympusxyz.com/covers/nano-machine.jpg",
+    });
+
+    expect(res.status).toBe(200);
+    const manga = await prisma.manga.findUniqueOrThrow({
+      where: { normalizedSlug: "nano-machine" },
+    });
+    expect(manga.coverUrl).toBe(
+      "https://olympusxyz.com/covers/nano-machine.jpg",
+    );
+    expect(await prisma.readingEvent.count()).toBe(1);
+  });
+
+  it("never overwrites an existing cover (first cover wins)", async () => {
+    await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 49",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+      coverUrl: "https://cdn.example.com/real-cover.jpg",
+    });
+
+    await postEvent({
+      mangaName: "Nano Machine",
+      chapterLabel: "Cap. 50",
+      sourceUrl: "https://olympusxyz.com/nano-machine",
+      coverUrl: "https://olympusxyz.com/other-image.webp",
+    });
+
+    const manga = await prisma.manga.findUniqueOrThrow({
+      where: { normalizedSlug: "nano-machine" },
+    });
+    expect(manga.coverUrl).toBe("https://cdn.example.com/real-cover.jpg");
   });
 
   it("rejects a missing mangaName with a JSON 400", async () => {

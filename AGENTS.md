@@ -12,6 +12,9 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `src/lib/` — pure shared utilities (slug normalization, chapter parsing) with colocated tests
 - `src/generated/prisma/` — generated Prisma client (never edit; gitignored)
 - `prisma/schema.prisma` — data model; migrations live in `prisma/migrations/`
+- `public/` — dashboard static build (gitignored), deployed from the sibling
+  `manga-tracker-dashboard` repo (`bun run deploy` there); served by `src/index.ts` on
+  `/` + `/manga/:id` + `/duplicates`
 - `bunfig.toml` + `test-setup.ts` — bun test preload: throwaway per-run SQLite DB (migrations via `bun:sqlite`)
 - `PLAN.md` + `docs/GUIA-IMPLEMENTACION.md` — roadmap and module specs (events, library, adapters, duplicates)
 
@@ -32,7 +35,8 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 
 ## Architecture
 - Reading progress is stored as append-only events; current state is derived by projection —
-  event rows are never UPDATEd or DELETEd.
+  event rows are never UPDATEd or DELETEd. The only report that does not append: a chapter
+  already present in the manga's history (re-reads/reloads) returns its existing event.
 - One module = one vertical slice under `src/modules/<name>/` (routes + service + tests
   together).
 - Dependency direction: `src/index.ts` → `src/modules/*` → `src/db` / `src/config` / `src/lib`;
