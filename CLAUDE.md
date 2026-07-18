@@ -1,5 +1,9 @@
 @AGENTS.md
 
+## Sandbox note
+- This repo's `Read` denies (`src/generated/`, `.env`, `*.db`) also apply to sandboxed Bash:
+  `bun test` / `lint` / `typecheck` fail in-sandbox — run them unsandboxed (pre-approved).
+
 ## Config maintenance
 - After ANY task that changed structure, commands or conventions: check that this file — and
   AGENTS.md if present — still matches reality; propose the exact edit in the same session.

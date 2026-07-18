@@ -9,7 +9,9 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `src/config.ts` — the only place that reads environment variables
 - `src/db/client.ts` — PrismaClient wired to the libSQL adapter
 - `src/modules/<feature>/` — one vertical slice: `*.routes.ts` + `*.service.ts` + `*.test.ts`
-- `src/lib/` — pure shared utilities (slug normalization, chapter parsing) with colocated tests
+  (plus extra colocated units when needed, e.g. `events/events.bus.ts`)
+- `src/lib/` — pure shared utilities (normalization, chapter parsing, title similarity,
+  shared Zod schemas + error hook) with colocated tests
 - `src/generated/prisma/` — generated Prisma client (never edit; gitignored)
 - `prisma/schema.prisma` — data model; migrations live in `prisma/migrations/`
 - `public/` — dashboard static build (gitignored), deployed from the sibling
@@ -41,6 +43,9 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   together).
 - Dependency direction: `src/index.ts` → `src/modules/*` → `src/db` / `src/config` / `src/lib`;
   `db`, `config` and `lib` never import from `modules` (`lib` holds pure functions only).
+  Modules never import each other's services/routes; the one sanctioned cross-module edge is
+  the in-process event bus (`events/events.bus.ts`), imported to publish SSE change
+  notifications.
 - Only `src/config.ts` reads env vars; everything else receives values from it.
 
 ## Engineering standards
