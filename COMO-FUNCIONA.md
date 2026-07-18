@@ -18,17 +18,30 @@ El sistema completo son tres piezas (tres repos separados); este repo es la prim
 
 1. **`manga-tracker-api`** (este repo) — guarda todo y expone la API REST en
    `http://127.0.0.1:5150`. Corre siempre, sola, gracias a un LaunchAgent de macOS.
-2. **`manga-tracker-extension`** (futura) — extensión de navegador que detecta qué manga y
-   capítulo estás leyendo y se lo manda a la API.
-3. **`manga-tracker-dashboard`** (futura) — web para mirar tu biblioteca; la servirá esta
-   misma API desde `/`.
+2. **`manga-tracker-extension`** — extensión de navegador (MV3) que detecta qué manga y
+   capítulo estás leyendo y se lo manda a la API, junto con la portada (`og:image`) si la
+   página la declara. Su id es fijo (el manifest lleva `key`), por eso puede estar clavado
+   en la lista CORS.
+3. **`manga-tracker-dashboard`** — la web de tu biblioteca. Su build estático se copia a
+   `public/` (con `bun run deploy` en ese repo) y esta misma API lo sirve en `/`,
+   `/manga/:id` y `/duplicates`; se refresca solo escuchando el stream SSE
+   (`GET /api/events/stream`).
 
-**La regla de oro que atraviesa todo el diseño:** tu progreso nunca se borra ni retrocede.
-Cada lectura se guarda como un **evento nuevo** (nunca se modifica ni borra uno anterior —
-"append-only"), y el "capítulo al que llegaste" no es un campo guardado: se **calcula** como
-el máximo de toda tu historia. Por eso, cuando un sitio cambia de servidor y te muestra el
-capítulo 1 de nuevo, ese evento se guarda igual (es historia real) pero tu progreso sigue
-siendo el máximo que alcanzaste.
+**La regla de oro que atraviesa todo el diseño:** tu progreso nunca se borra solo ni
+retrocede. Cada lectura se guarda como un **evento nuevo** (nunca se modifica ni borra uno
+anterior — "append-only"), y el "capítulo al que llegaste" no es un campo guardado: se
+**calcula** como el máximo de toda tu historia. Por eso, cuando un sitio cambia de servidor
+y te muestra el capítulo 1 de nuevo, ese evento se guarda igual (es historia real) pero tu
+progreso sigue siendo el máximo que alcanzaste.
+
+La regla tiene exactamente dos matices, ambos deliberados:
+
+- **Dedup estricto**: reportar un capítulo que **ya está** en la historia del manga (una
+  relectura, o la página que recarga y re-reporta) no inserta nada — devuelve el evento
+  guardado (`200` en vez de `201`). Un mismo capítulo es una fila, no veinte.
+- **Borrado explícito**: `DELETE /api/mangas/{id}` existe para cuando VOS decidís sacar un
+  manga entero (con toda su historia, vía `onDelete: Cascade`). Es la única puerta de
+  salida de datos, siempre iniciada por el usuario — la aplicación jamás borra sola.
 
 El viaje de una lectura:
 
@@ -39,16 +52,24 @@ sequenceDiagram
     participant S as events.service.ts
     participant DB as SQLite (Prisma)
 
-    E->>R: POST /api/events {mangaName, chapterLabel, sourceUrl}
+    E->>R: POST /api/events {mangaName, chapterLabel, sourceUrl, coverUrl?}
     R->>R: Zod valida el body → si falla, 400 {error}
     R->>S: recordReadingEvent(body)
     S->>S: normalizeSlug("One Piece Manga") → "one-piece"
     S->>S: new URL(sourceUrl).hostname → "olympusxyz.com"
     S->>S: parseChapterNumber("Cap. 130.5") → 130.5
     S->>DB: upsert Manga por normalizedSlug (crea o reutiliza)
-    S->>DB: INSERT ReadingEvent (siempre inserta, jamás UPDATE)
-    S-->>R: {manga, event}
-    R-->>E: 201 {manga, event} (fechas como ISO string)
+    S->>DB: guarda coverUrl solo si no había portada (first cover wins)
+    S->>DB: ¿capítulo ya en la historia? (número parseado, o label exacto)
+    alt capítulo nuevo
+        S->>DB: INSERT ReadingEvent (jamás UPDATE)
+        S->>S: publishLibraryChanged() → el dashboard conectado se refresca
+        S-->>R: {manga, event, created: true}
+        R-->>E: 201 {manga, event} (fechas como ISO string)
+    else ya registrado (relectura/recarga)
+        S-->>R: {manga, event existente, created: false}
+        R-->>E: 200 {manga, event}
+    end
 ```
 
 La deduplicación vive en el slug: "One Piece", "One Piece Manga" y "one piece cómic" caen
@@ -62,13 +83,14 @@ solo** registro con toda la historia unificada.
 ### `src/index.ts` — el punto de entrada
 
 Es el único archivo con `export default` (lo exige Bun para levantar el servidor). Hace
-cinco cosas, en orden:
+seis cosas, en orden:
 
 1. **Crea la app**: `const app = new OpenAPIHono()` — un router de Hono que además sabe
    generar documentación OpenAPI a partir de las rutas.
 2. **CORS**: `app.use("*", cors({ origin: [...] }))` — solo acepta peticiones de navegador
-   originadas en `http://127.0.0.1:5150` y `http://localhost:5150` (el futuro dashboard).
-   Cuando exista la extensión, se agregará su `chrome-extension://<id>` a esta lista.
+   originadas en `http://127.0.0.1:5150` / `http://localhost:5150` (el dashboard, que es
+   same-origin) y en `chrome-extension://cfjiinlnepkmlaafdclmlpjbmpofplop` (la extensión;
+   el id puede estar clavado porque su manifest lleva `key`, que lo hace fijo).
    (Postman y curl no son navegadores: a ellos CORS no les aplica.)
 3. **Red de seguridad de errores**: `app.onError(...)` — si algo revienta sin ser manejado,
    loguea el stack y responde `500 {"error": "Internal Server Error"}`. Toda la API usa ese
@@ -77,12 +99,21 @@ cinco cosas, en orden:
 4. **Monta los módulos**: `health` en la raíz (`/health`) y los cuatro módulos de negocio
    bajo el prefijo `/api` (`app.route("/api", eventsRoutes)`, etc.). Al montar, Hono también
    fusiona la documentación de cada módulo en el spec global.
-5. **Documentación**: `app.doc("/openapi.json", ...)` publica el spec OpenAPI 3.1 y
+5. **Sirve el dashboard**: los estáticos de `public/` — `/assets/*` y `/favicon.svg` con
+   `serveStatic` de `hono/bun`, y el `index.html` de la SPA **solo** en las tres rutas
+   conocidas (`/`, `/manga/:id`, `/duplicates`). Ese fallback selectivo mantiene 404s
+   reales en `/api/*`, `/docs` y `/openapi.json`; y mientras no hayas copiado ningún build
+   (`bun run deploy` en `manga-tracker-dashboard`), esas rutas simplemente dan 404.
+6. **Documentación**: `app.doc("/openapi.json", ...)` publica el spec OpenAPI 3.1 y
    `app.get("/docs", swaggerUI(...))` sirve la interfaz Swagger.
 
-Al final exporta `{ port: config.port, hostname: "127.0.0.1", fetch: app.fetch }`:
+Al final exporta `{ port, hostname: "127.0.0.1", idleTimeout: 120, fetch: app.fetch }`:
 Bun lee ese objeto y levanta el servidor HTTP. `hostname: "127.0.0.1"` es una decisión de
 seguridad: el backend **solo** escucha en tu propia Mac, nadie de tu red puede tocarlo.
+`idleTimeout: 120` existe por el stream SSE: Bun corta por defecto toda conexión que pase
+10 segundos en silencio — incluso a mitad de un stream — y eso mataba el feed en vivo entre
+latidos; 120 s de margen contra un latido cada 25 s lo mantienen siempre vivo (ver el
+módulo `events`).
 
 ### `src/config.ts` — el único lector de variables de entorno
 
@@ -115,15 +146,21 @@ gitignoreada y jamás se edita a mano.
 
 Tres tablas:
 
-- **`Manga`** — la identidad de cada obra: `canonicalName` (el nombre que ves, corregible) y
-  `normalizedSlug` (**único**, la clave de deduplicación — jamás se corrige a mano).
+- **`Manga`** — la identidad de cada obra: `canonicalName` (el nombre que ves, corregible),
+  `normalizedSlug` (**único**, la clave de deduplicación — jamás se corrige a mano), y tres
+  campos que curás desde el dashboard: `coverUrl` (nullable — la portada que capturó la
+  extensión o que fijaste a mano), `status` (`"reading"` por defecto; también
+  `"completed"` / `"dropped"`) y `tags` (un **string JSON** tipo `'["shonen","favs"]'` —
+  SQLite no tiene columnas array ni enums, así que el array vive serializado y se valida en
+  los bordes, ver `src/lib/schemas.ts`).
 - **`ReadingEvent`** — el log append-only: `chapterLabel` (texto original, "Cap. 130.5"),
   `chapterNumber` (el número parseado, **nullable** si no se pudo parsear), `sourceUrl`,
   `sourceDomain` y `readAt`. Tiene dos detalles finos:
   - `@@index([mangaId, readAt(sort: Desc)])` — el índice que acelera la consulta típica de
     la biblioteca ("los eventos de este manga, del más nuevo al más viejo").
-  - `onDelete: Cascade` — si algún día se borrara un Manga, sus eventos caen con él (no
-    quedan huérfanos). La API no expone borrado; esto es higiene del schema.
+  - `onDelete: Cascade` — al borrar un Manga sus eventos caen con él (no quedan
+    huérfanos). Es lo que hace limpio el `DELETE /api/mangas/{id}` del módulo `library`:
+    una sola operación borra la obra y toda su historia.
 - **`SiteAdapter`** — la "memoria" de cómo leer cada sitio: `domain` (único),
   `titleSelector` (obligatorio), `chapterSelector` y `chapterUrlRegex` (opcionales).
 
@@ -194,17 +231,22 @@ el mismo shape que el `onError` global. Un cliente de esta API solo necesita ent
 
 | Export | Qué es | Quién lo usa |
 |---|---|---|
-| `mangaSchema` / `MangaDto` | schema Zod del Manga como lo devuelve la API (fechas como ISO string) | `events`, `library`, `duplicates` |
+| `mangaStatusSchema` / `MangaStatus` | enum Zod `"reading" \| "completed" \| "dropped"` | `mangaSchema` y el PUT de `library` |
+| `mangaSchema` / `MangaDto` | schema Zod del Manga como lo devuelve la API (fechas ISO, `tags` ya como array, `status` como enum) | `events`, `library`, `duplicates` |
 | `readingEventSchema` / `ReadingEventDto` | ídem para ReadingEvent | `events`, `library` |
-| `toMangaDto(manga)` | convierte la entidad de Prisma (con `Date`) al DTO (con string ISO) | handlers de esos módulos |
+| `toMangaDto(manga)` | entidad de Prisma (`Date`, `tags` como string JSON) → DTO (ISO, array real) | handlers de esos módulos |
 | `toEventDto(event)` | ídem para eventos | ídem |
+| `tagsFromJson(raw)` | parsea el string JSON de `tags`; corrupto o no-array degrada a `[]` en vez de romper el listado | `toMangaDto` y el handler de `/api/library` |
+| `statusFromDb(raw)` | valida el `status` guardado; un valor inesperado lee como `"reading"` | ídem |
 
 ¿Por qué existe este archivo? Dos módulos distintos devuelven Mangas y eventos. Si cada uno
 declarara su propio schema, o se registraría dos veces el componente `"Manga"` en OpenAPI, o
 se bifurcaría el contrato. Y como los módulos **no pueden importarse entre sí** (regla de
 dependencias), el lugar compartido es `lib`. Los mappers reciben parámetros tipados
 estructuralmente (la forma, no el tipo de Prisma) para que `lib` no dependa de
-`src/generated`.
+`src/generated`. Y los dos helpers `tagsFromJson`/`statusFromDb` son la frontera
+defensiva: la base guarda strings planos (límite de SQLite), pero la API jamás devuelve un
+status inválido ni unos tags rotos — degradan, no explotan.
 
 Los tipos de request/response de toda la API se derivan de estos schemas con `z.infer` —
 nunca se escriben a mano, así el tipo y la validación no pueden divergir.
@@ -216,27 +258,38 @@ nunca se escriben a mano, así el tipo y la validación no pueden divergir.
 Cada módulo es un "vertical slice": una carpeta con **tres archivos** — `*.routes.ts`
 (las URLs: qué entra, qué sale, códigos de estado; solo valida y mapea), `*.service.ts`
 (la lógica de verdad, es quien toca la base) y `*.test.ts` (sus pruebas). El patrón lo marca
-`src/modules/health/`, el ejemplo mínimo.
+`src/modules/health/`, el ejemplo mínimo. `events` suma una pieza extra colocada en su
+carpeta: `events.bus.ts`, el bus de notificaciones (abajo).
+
+Regla de aislamiento: los módulos **no se importan entre sí** — con una única excepción
+sancionada: importar `events/events.bus.ts` para publicar "la biblioteca cambió" (lo hace
+`library` tras un PUT o DELETE). Todo lo demás compartido vive en `lib`.
 
 ### `health` — el ping
 
 - **`GET /health`** → `200 {"status": "ok"}`. Sin service (no hay lógica). Lo usan: vos
-  (curl), el futuro popup de la extensión para mostrar "Conectado", y launchd indirectamente
+  (curl), el popup de la extensión para mostrar "Conectado", y launchd indirectamente
   (es cómo verificás que el agente está vivo).
 
-### `events` — recibir cada lectura (el corazón)
+### `events` — recibir cada lectura y avisar en vivo (el corazón)
 
-**Ruta** — `POST /api/events`. Body validado:
+**Rutas:**
+
+| Ruta | Qué hace |
+|---|---|
+| `POST /api/events` | registra una lectura → `201` (evento nuevo) · `200` (capítulo ya registrado: devuelve el existente) · `400` |
+| `GET /api/events/stream` | stream **SSE** permanente: emite `library-changed` cada vez que la proyección cambia |
+
+Body del POST, validado:
 
 | Campo | Regla |
 |---|---|
 | `mangaName` | string, sin espacios alrededor, no vacío |
 | `chapterLabel` | ídem |
 | `sourceUrl` | URL válida (garantiza que `new URL()` en el service nunca explote) |
+| `coverUrl` | URL válida, **opcional** — el `og:image` que la extensión encontró en la página |
 
-Respuestas: `201 { manga, event }` · `400 { error }`.
-
-**Service** — `recordReadingEvent(input)`:
+**Service** — `recordReadingEvent(input)` devuelve `{ manga, event, created }`:
 
 1. `normalizeSlug(mangaName)` → la clave de deduplicación.
 2. `new URL(sourceUrl).hostname` → el dominio (la API de URL ya lo devuelve en minúsculas).
@@ -244,24 +297,57 @@ Respuestas: `201 { manga, event }` · `400 { error }`.
 4. `prisma.manga.upsert({ where: { normalizedSlug }, create: {...}, update: {} })` — si el
    manga ya existe lo reutiliza (el `update: {}` vacío significa "no le cambies nada"), si
    no lo crea con el nombre visible original.
-5. `prisma.readingEvent.create(...)` — **siempre inserta**. No compara contra el máximo
-   anterior, no actualiza nada: la regla anti-retroceso no vive acá, vive en la proyección
-   de la biblioteca. Registrar el capítulo 1 después del 12 es correcto: es historia.
+5. **First cover wins**: si vino `coverUrl` y el manga aún no tiene portada, la guarda. Una
+   portada ya guardada (automática o puesta a mano) **jamás** se pisa con lecturas
+   posteriores; para cambiarla se limpia primero desde el dashboard (`coverUrl: null` en el
+   PUT) y la próxima lectura la rellena. Este paso corre incluso cuando el reporte termina
+   deduplicado.
+6. **Dedup estricto por identidad de capítulo**: busca si ese capítulo ya está en la
+   historia del manga — por `chapterNumber` parseado cuando existe ("Cap. 49" y
+   "Chapter 49" son el mismo capítulo aunque el texto difiera), o por `chapterLabel`
+   exacto cuando no se pudo parsear. Si ya estaba, devuelve ese evento con
+   `created: false` (la ruta lo traduce a `200`): releer o recargar la página no infla la
+   historia, sin importar cuán viejo sea el evento original.
+7. Si es capítulo nuevo: `prisma.readingEvent.create(...)` — inserta, jamás UPDATE. No
+   compara contra el máximo anterior: la regla anti-retroceso no vive acá, vive en la
+   proyección de la biblioteca. Registrar el capítulo 1 después del 12 es correcto: es
+   historia.
+8. `publishLibraryChanged()` — avisa por el bus (también cuando lo único que cambió fue la
+   portada de un reporte deduplicado), y el dashboard abierto se refresca al instante.
 
-### `library` — mirar la biblioteca (solo lee, nunca escribe eventos)
+**`events.bus.ts`** — el bus de notificaciones en memoria. Un `Set` de listeners y dos
+funciones: `subscribeLibraryChanges(listener)` (devuelve la función para desuscribirse) y
+`publishLibraryChanged()` (invoca a todos). Sin colas, sin persistencia, sin payload: el
+aviso significa "algo cambió, volvé a pedir la biblioteca". Es la única dependencia
+permitida entre módulos — `library` lo importa para avisar tras sus escrituras.
+
+**El stream SSE** (`GET /api/events/stream`) — Server-Sent Events: una respuesta HTTP que
+nunca termina, por la que el servidor empuja eventos de texto que `EventSource` recibe en
+el navegador sin hacer polling. El handler (con `streamSSE` de Hono) se suscribe al bus y
+reenvía cada aviso como evento `library-changed`; registra la limpieza en `stream.onAbort`
+(el navegador cerró → desuscribir, cero listeners zombis); y late un `ping` cada **25
+segundos**. El latido no es decorativo: Bun corta conexiones tras 10 s de silencio por
+defecto, así que `src/index.ts` sube `idleTimeout` a 120 s y el ping de 25 s mantiene el
+stream siempre lejos de ese límite (esta pareja de números arregló el bug real de que el
+feed moría entre latidos y el dashboard se perdía los updates).
+
+### `library` — mirar y curar la biblioteca (jamás escribe eventos)
 
 **Rutas:**
 
-| Ruta | Qué devuelve |
+| Ruta | Qué hace |
 |---|---|
 | `GET /api/library` | un array de entradas proyectadas (ver abajo); filtros opcionales `?domain=` y `?since=<fecha ISO>` |
 | `GET /api/mangas/{id}/history` | `{ manga, events }` con todos los eventos del más nuevo al más viejo · `404` si no existe |
-| `PUT /api/mangas/{id}` | corrige el nombre visible; body `{ canonicalName }` · `400`/`404` |
+| `PUT /api/mangas/{id}` | correcciones manuales; body `{ canonicalName?, status?, tags?, coverUrl? }`, al menos un campo — `coverUrl: null` limpia la portada · `400`/`404` |
+| `GET /api/mangas/{id}/cover` | la imagen de portada, **proxeada** por el servidor para saltar el anti-hotlink (ver abajo) · `404` |
+| `DELETE /api/mangas/{id}` | borra el manga y TODA su historia (cascade) · `204`/`404` |
 
 **Service:**
 
-- `getLibrary(filters)` — trae los mangas con sus eventos (ordenados desc por fecha) y llama
-  a `project` por cada uno. Los filtros se traducen a condiciones Prisma: `domain` = "tiene
+- `getLibrary(filters)` — trae los mangas con sus eventos (ordenados desc por fecha), llama
+  a `project` por cada uno y ordena las entradas por última actividad (lo más recién leído
+  primero). Los filtros se traducen a condiciones Prisma: `domain` = "tiene
   al menos un evento en ese dominio", `since` = "tiene al menos un evento desde esa fecha".
 - `project(manga)` (privada del archivo) — la función más importante de la lectura de datos.
   Por cada manga calcula:
@@ -271,15 +357,33 @@ Respuestas: `201 { manga, event }` · `400 { error }`.
     `null`. **Este es tu progreso real, y por construcción nunca puede retroceder.**
   - **`lastActivity`** = el evento más reciente a secas (`{ readAt, chapterLabel }`), aunque
     sea una relectura del capítulo 2. Te dice "cuándo fue la última vez que tocaste esto".
-  - `readCount` (total de eventos) y `sourceDomains` (los sitios, sin duplicar).
+  - `lastSourceUrl` (la URL del evento más reciente — el "seguir leyendo" del dashboard),
+    `readCount` (total de eventos) y `sourceDomains` (los sitios, sin duplicar), más los
+    campos propios del manga: `coverUrl`, `status` y `tags`.
 
-  Separar esos dos números es lo que hace inmune al sistema frente a cambios de servidor:
-  el evento "capítulo 1 de nuevo" mueve `lastActivity` pero jamás `reachedChapter`.
+  Separar `reachedChapter` de `lastActivity` es lo que hace inmune al sistema frente a
+  cambios de servidor: el evento "capítulo 1 de nuevo" mueve `lastActivity` pero jamás
+  `reachedChapter`.
 - `getMangaHistory(id)` — manga + eventos desc, o `null` (la ruta lo traduce a 404).
-- `updateCanonicalName(id, nombre)` — actualiza **solo** `canonicalName`. El
-  `normalizedSlug` queda intacto a propósito: es la clave de deduplicación futura; cambiarlo
-  rompería el matching o chocaría con otro manga. Corregís el nombre feo que detectó la
-  heurística sin tocar la identidad.
+- `updateManga(id, input)` — aplica **solo** los campos presentes: `canonicalName`,
+  `status`, `tags` (se serializa a JSON al guardar) y `coverUrl` (string = portada manual;
+  `null` = limpiarla). El `normalizedSlug` queda intacto a propósito: es la clave de
+  deduplicación; cambiarlo rompería el matching futuro o chocaría con otro manga. Al
+  terminar publica en el bus para que el dashboard se refresque.
+- `fetchMangaCover(id)` — el truco anti-hotlink. Algunos CDNs de portadas (caso real:
+  `img2mw.xyz`, el CDN de manhwaweb) solo sirven la imagen si el request trae el `Referer`
+  de su propio sitio — y un navegador **jamás** puede mandar el referer de otro sitio, así
+  que el dashboard vería 403 eternos. El servidor local sí puede: descarga la portada
+  mandando `Referer: https://<sourceDomain del evento más reciente>/` y un User-Agent de
+  navegador; si el CDN la rechaza, **reintenta una vez sin referer** (hay CDNs que
+  bloquean referers ajenos pero aceptan ninguno); valida que la respuesta sea `image/*`
+  (nunca reenvía una página de error como si fuera imagen) con timeout de 10 s. La ruta la
+  sirve con `Cache-Control` de un día — seguro porque el dashboard agrega
+  `?v=<hash del coverUrl>` como cache-buster, así cambiar la portada invalida el caché
+  solo. El `fetch` es inyectable para que los tests simulen CDNs sin tocar la red.
+- `deleteManga(id)` — borra el manga; sus eventos caen con él por `onDelete: Cascade`. Es
+  la única puerta sancionada de salida de datos del log, siempre una decisión explícita
+  tuya desde el dashboard. También publica en el bus.
 
 ### `adapters` — la memoria de cómo leer cada sitio
 
@@ -316,7 +420,7 @@ con una tabla de alias resuelta en la proyección, sin tocar eventos.
 
 ---
 
-## 5. Los tests (39, todos contra una base real)
+## 5. Los tests (65, todos contra una base real)
 
 ### La infraestructura: `bunfig.toml` + `test-setup.ts`
 
@@ -348,9 +452,10 @@ sin puertos.
 | `health.test.ts` | 1 | el ping responde `{status:"ok"}` |
 | `normalize.test.ts` | 6 | acentos, sufijos apilados ("One Piece Manga" = "One Piece"), entradas raras |
 | `similarity.test.ts` | 8 | distancias conocidas (kitten→sitting=3), simetría, umbral 0.85 |
-| `schemas.test.ts` | 2 | mappers Date→ISO, `chapterNumber` null pasa intacto |
-| `events.test.ts` | 6 | dedup por slug, **anti-retroceso** (10,11,12 y luego 1 → 4 inserts), 400s |
-| `library.test.ts` | 8 | **la regla de oro como test**: reached=12 con lastActivity=Cap. 1; filtros; PUT no toca el slug |
+| `schemas.test.ts` | 8 | mappers Date→ISO, `chapterNumber` null intacto, tags corruptos → `[]`, status desconocido → `"reading"` |
+| `events.test.ts` | 13 | dedup por slug, **anti-retroceso** (10,11,12 y luego 1 → 4 inserts), **dedup estricto** ("Cap. 49" = "Chapter 49" → 200; labels sin número, por texto exacto), first cover wins, 400s |
+| `events.bus.test.ts` | 2 | publicar notifica a todos los suscriptos; desuscribirse deja de notificar |
+| `library.test.ts` | 19 | **la regla de oro como test**: reached=12 con lastActivity=Cap. 1; orden por actividad; `lastSourceUrl`; filtros; PUT parcial (nombre/status/tags/portada) sin tocar el slug; el proxy de portada (manda el referer del sitio, retry sin referer, rechaza no-imagen); DELETE arrastra toda la historia |
 | `adapters.test.ts` | 5 | round-trip, replace total en recalibración, case-insensitive, 404/400 |
 | `duplicates.test.ts` | 3 | exactamente el par esperado con sim ≈ 0.93, listas vacías |
 
@@ -443,6 +548,7 @@ DATABASE_URL="file:$HOME/Library/Application Support/MangaTracker/mangatracker.d
 | Logs del servicio | `~/Library/Logs/MangaTracker/` | ✅ Sí |
 | La receta del LaunchAgent | `~/Library/LaunchAgents/com.mangatracker.plist` | ✅ Sí (pero ver abajo) |
 | Base de desarrollo (`dev.db`) | raíz del repo (gitignoreada) | ❌ Se pierde — son datos de prueba, da igual |
+| Build del dashboard (`public/`) | raíz del repo (gitignoreado) | ❌ Se regenera con `bun run deploy` en `manga-tracker-dashboard` |
 | `.env` | raíz del repo (gitignoreado) | ❌ Se pierde — se recrea en 5 segundos |
 | El código | el repo + GitHub | ✅ En GitHub |
 
@@ -461,6 +567,8 @@ bun install
 echo 'DATABASE_URL="file:./dev.db"' > .env   # solo para desarrollo
 bun run db:generate                           # regenera el cliente de Prisma (gitignoreado)
 launchctl kickstart -k gui/$(id -u)/com.mangatracker   # y producción vuelve, con TU base intacta
+# el dashboard (public/ también es gitignoreado):
+cd ../manga-tracker-dashboard && bun run deploy
 ```
 
 (En una Mac nueva además: instalar bun, ajustar su ruta en el plist si difiere, copiar el

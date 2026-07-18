@@ -44,6 +44,8 @@ bun run db:migrate
 - `src/modules/<feature>/` — vertical slices: routes + service + tests per feature
 - `src/lib/` — pure shared utilities (slug normalization, chapter parsing) with tests
 - `prisma/` — schema and migrations
+- `public/` — static build of the web dashboard (gitignored; deployed from the sibling
+  `manga-tracker-dashboard` repo), served by the API on `/`, `/manga/:id` and `/duplicates`
 - `PLAN.md`, `docs/` — implementation roadmap and module specs
 - `COMO-FUNCIONA.md` — in-depth walkthrough (es): every file explained, plus ops (Swagger, Postman, launchd, data locations)
 
