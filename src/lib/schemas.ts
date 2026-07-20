@@ -11,6 +11,11 @@ export const mangaSchema = z
     canonicalName: z.string(),
     normalizedSlug: z.string(),
     coverUrl: z.string().nullable(),
+    // Bumped on every cover mutation; clients cache-bust /cover with it.
+    coverVersion: z.number().int(),
+    // True once cover bytes are stored locally; the extension heals covers
+    // whose bytes are still pending.
+    hasStoredCover: z.boolean(),
     status: mangaStatusSchema,
     tags: z.array(z.string()),
     createdAt: z.iso.datetime(),
@@ -56,6 +61,8 @@ export function toMangaDto(manga: {
   canonicalName: string;
   normalizedSlug: string;
   coverUrl: string | null;
+  coverImage: Uint8Array | null;
+  coverVersion: number;
   status: string;
   tags: string;
   createdAt: Date;
@@ -65,6 +72,8 @@ export function toMangaDto(manga: {
     canonicalName: manga.canonicalName,
     normalizedSlug: manga.normalizedSlug,
     coverUrl: manga.coverUrl,
+    coverVersion: manga.coverVersion,
+    hasStoredCover: manga.coverImage !== null,
     status: statusFromDb(manga.status),
     tags: tagsFromJson(manga.tags),
     createdAt: manga.createdAt.toISOString(),

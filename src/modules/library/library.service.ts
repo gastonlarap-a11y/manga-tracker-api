@@ -12,6 +12,10 @@ export interface LibraryProjection {
   canonicalName: string;
   normalizedSlug: string;
   coverUrl: string | null;
+  coverVersion: number;
+  // True once cover bytes are stored locally — the extension uses it to know
+  // which covers still need a byte backfill.
+  hasStoredCover: boolean;
   status: string;
   tags: string;
   reachedChapter: { number: number; label: string } | null;
@@ -101,7 +105,42 @@ export async function updateManga(
         : {}),
       ...(input.status !== undefined ? { status: input.status } : {}),
       ...(input.tags !== undefined ? { tags: JSON.stringify(input.tags) } : {}),
-      ...(input.coverUrl !== undefined ? { coverUrl: input.coverUrl } : {}),
+      // A new (or cleared) coverUrl invalidates bytes captured for the old
+      // one; the version bump tells clients the cover identity changed.
+      ...(input.coverUrl !== undefined
+        ? {
+            coverUrl: input.coverUrl,
+            coverImage: null,
+            coverImageType: null,
+            coverVersion: { increment: 1 },
+          }
+        : {}),
+    },
+  });
+  publishLibraryChanged();
+  return manga;
+}
+
+/**
+ * Cover bytes captured by the extension inside the real browser — the only
+ * client that hotlink-protected/Cloudflare-walled CDNs admit. Stored in the
+ * DB so covers keep working even after the source site dies.
+ */
+export async function storeMangaCoverImage(
+  id: string,
+  bytes: ArrayBuffer,
+  contentType: string,
+): Promise<Manga | null> {
+  const existing = await prisma.manga.findUnique({ where: { id } });
+  if (!existing) {
+    return null;
+  }
+  const manga = await prisma.manga.update({
+    where: { id },
+    data: {
+      coverImage: new Uint8Array(bytes),
+      coverImageType: contentType,
+      coverVersion: { increment: 1 },
     },
   });
   publishLibraryChanged();
@@ -111,6 +150,14 @@ export async function updateManga(
 export interface CoverImage {
   body: ArrayBuffer;
   contentType: string;
+}
+
+// Prisma returns Bytes columns as views whose raw .buffer may be a shared
+// pool with unrelated bytes — copying is the only safe way to an ArrayBuffer.
+function toArrayBuffer(view: Uint8Array): ArrayBuffer {
+  const copy = new ArrayBuffer(view.byteLength);
+  new Uint8Array(copy).set(view);
+  return copy;
 }
 
 // Some cover CDNs enforce hotlink protection (img2mw.xyz serves manhwaweb
@@ -125,11 +172,19 @@ const COVER_FETCH_TIMEOUT_MS = 10_000;
 // which would force every test mock to fake it).
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
 
+// Enough for any realistic site-migration trail; the no-referer retry always
+// runs after these.
+const MAX_REFERER_ATTEMPTS = 4;
+
 /**
- * Fetches the manga's stored cover on the server, sending the Referer of the
- * site the manga is read on (its most recent event's sourceDomain). If the
- * upstream rejects that referer, retries once without any — some CDNs block
- * foreign referers but accept none. fetchFn is injectable for tests.
+ * Serves the manga's cover: locally stored bytes first (captured by the
+ * extension in the real browser; immune to CDN blocking and site death).
+ * Otherwise proxies the stored coverUrl, trying the Referer of EVERY site
+ * the manga has been read on, most recent first — after a site migration the
+ * cover often belongs to a previous site's CDN, which only accepts its own
+ * referer (img2mw.xyz wants manhwaweb even when the latest reads happen on
+ * lectorxd). A successful proxy fetch persists the bytes, so each cover is
+ * fetched from its CDN at most once. fetchFn is injectable for tests.
  */
 export async function fetchMangaCover(
   id: string,
@@ -137,9 +192,18 @@ export async function fetchMangaCover(
 ): Promise<CoverImage | null> {
   const manga = await prisma.manga.findUnique({
     where: { id },
-    include: { events: { orderBy: { readAt: "desc" }, take: 1 } },
+    include: { events: { orderBy: { readAt: "desc" } } },
   });
-  if (!manga?.coverUrl) {
+  if (!manga) {
+    return null;
+  }
+  if (manga.coverImage !== null && manga.coverImageType !== null) {
+    return {
+      body: toArrayBuffer(manga.coverImage),
+      contentType: manga.coverImageType,
+    };
+  }
+  if (!manga.coverUrl) {
     return null;
   }
 
@@ -153,14 +217,21 @@ export async function fetchMangaCover(
     return null;
   }
 
-  const sourceDomain = manga.events[0]?.sourceDomain;
-  const referer = sourceDomain
-    ? `https://${sourceDomain}/`
-    : `${coverUrl.origin}/`;
+  const domains = [
+    ...new Set(manga.events.map((event) => event.sourceDomain)),
+  ].slice(0, MAX_REFERER_ATTEMPTS);
+  const referers = domains.length
+    ? domains.map((domain) => `https://${domain}/`)
+    : [`${coverUrl.origin}/`];
 
-  const response =
-    (await fetchCover(fetchFn, coverUrl.href, referer)) ??
-    (await fetchCover(fetchFn, coverUrl.href, null));
+  let response: Response | null = null;
+  for (const referer of referers) {
+    response = await fetchCover(fetchFn, coverUrl.href, referer);
+    if (response) {
+      break;
+    }
+  }
+  response ??= await fetchCover(fetchFn, coverUrl.href, null);
   if (!response) {
     return null;
   }
@@ -169,7 +240,19 @@ export async function fetchMangaCover(
   if (!contentType.startsWith("image/")) {
     return null;
   }
-  return { body: await response.arrayBuffer(), contentType };
+  const body = await response.arrayBuffer();
+  // First successful proxy fetch becomes permanent local bytes: the cover
+  // survives referer changes, CDN policy changes and the site dying.
+  await prisma.manga.update({
+    where: { id },
+    data: {
+      coverImage: new Uint8Array(body),
+      coverImageType: contentType,
+      coverVersion: { increment: 1 },
+    },
+  });
+  publishLibraryChanged();
+  return { body, contentType };
 }
 
 async function fetchCover(
@@ -228,6 +311,8 @@ function project(manga: Manga & { events: ReadingEvent[] }): LibraryProjection {
     canonicalName: manga.canonicalName,
     normalizedSlug: manga.normalizedSlug,
     coverUrl: manga.coverUrl,
+    coverVersion: manga.coverVersion,
+    hasStoredCover: manga.coverImage !== null,
     status: manga.status,
     tags: manga.tags,
     reachedChapter,
