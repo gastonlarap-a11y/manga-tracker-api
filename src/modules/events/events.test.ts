@@ -239,6 +239,8 @@ describe("POST /events", () => {
       where: { normalizedSlug: "nano-machine" },
     });
     expect(manga.coverUrl).toBe("https://cdn.example.com/real-cover.jpg");
+    // Only the first (winning) cover bumped the version.
+    expect(manga.coverVersion).toBe(1);
   });
 
   it("rejects a missing mangaName with a JSON 400", async () => {

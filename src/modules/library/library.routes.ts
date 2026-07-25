@@ -1,4 +1,5 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
+import { bodyLimit } from "hono/body-limit";
 import { defaultHook, errorSchema } from "../../lib/http";
 import {
   mangaSchema,
@@ -14,8 +15,13 @@ import {
   fetchMangaCover,
   getLibrary,
   getMangaHistory,
+  storeMangaCoverImage,
   updateManga,
 } from "./library.service";
+
+// A real cover is a few hundred KB; anything bigger is a wrong pick, not a
+// cover.
+const MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024;
 
 export const libraryEntrySchema = z
   .object({
@@ -23,6 +29,8 @@ export const libraryEntrySchema = z
     canonicalName: z.string(),
     normalizedSlug: z.string(),
     coverUrl: z.string().nullable(),
+    coverVersion: z.number().int(),
+    hasStoredCover: z.boolean(),
     status: mangaStatusSchema,
     tags: z.array(z.string()),
     reachedChapter: z
@@ -133,6 +141,46 @@ const putMangaRoute = createRoute({
   },
 });
 
+const putCoverImageRoute = createRoute({
+  method: "put",
+  path: "/mangas/{id}/cover-image",
+  tags: ["library"],
+  middleware: [
+    bodyLimit({
+      maxSize: MAX_COVER_IMAGE_BYTES,
+      onError: (c) => c.json({ error: "Cover image too large" }, 413),
+    }),
+  ] as const,
+  request: {
+    params: mangaParamsSchema,
+    body: {
+      content: {
+        "image/*": { schema: z.string().openapi({ format: "binary" }) },
+      },
+      required: true,
+    },
+  },
+  responses: {
+    200: {
+      description:
+        "Cover bytes stored locally (captured by the extension in the browser)",
+      content: { "application/json": { schema: mangaSchema } },
+    },
+    400: {
+      description: "Body is not an image or is empty",
+      content: { "application/json": { schema: errorSchema } },
+    },
+    404: {
+      description: "Manga not found",
+      content: { "application/json": { schema: errorSchema } },
+    },
+    413: {
+      description: "Image exceeds the size cap",
+      content: { "application/json": { schema: errorSchema } },
+    },
+  },
+});
+
 const getCoverRoute = createRoute({
   method: "get",
   path: "/mangas/{id}/cover",
@@ -209,6 +257,24 @@ export const libraryRoutes = new OpenAPIHono({ defaultHook })
     const { id } = c.req.valid("param");
     const body = c.req.valid("json");
     const manga = await updateManga(id, body);
+    if (!manga) {
+      return c.json({ error: "Manga not found" }, 404);
+    }
+    return c.json(toMangaDto(manga), 200);
+  })
+  .openapi(putCoverImageRoute, async (c) => {
+    const { id } = c.req.valid("param");
+    // zod-openapi only validates JSON bodies; the image/* schema above is
+    // documentation, so the handler checks the binary body itself.
+    const contentType = c.req.header("content-type") ?? "";
+    if (!contentType.startsWith("image/")) {
+      return c.json({ error: "Content-Type must be image/*" }, 400);
+    }
+    const bytes = await c.req.arrayBuffer();
+    if (bytes.byteLength === 0) {
+      return c.json({ error: "Empty body" }, 400);
+    }
+    const manga = await storeMangaCoverImage(id, bytes, contentType);
     if (!manga) {
       return c.json({ error: "Manga not found" }, 404);
     }

@@ -43,7 +43,7 @@ export async function recordReadingEvent(
   if (input.coverUrl && manga.coverUrl === null) {
     manga = await prisma.manga.update({
       where: { id: manga.id },
-      data: { coverUrl: input.coverUrl },
+      data: { coverUrl: input.coverUrl, coverVersion: { increment: 1 } },
     });
     coverChanged = true;
   }

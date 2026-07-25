@@ -319,6 +319,33 @@ describe("PUT /mangas/{id}", () => {
     expect(mangaSchema.parse(await clear.json()).coverUrl).toBeNull();
   });
 
+  it("invalidates stored cover bytes and bumps the version on a coverUrl change", async () => {
+    const manga = await seedManga("one-piece", "One Piece", []);
+    await prisma.manga.update({
+      where: { id: manga.id },
+      data: {
+        coverUrl: "https://cdn.example.com/old.jpg",
+        coverImage: new Uint8Array([1, 2, 3]),
+        coverImageType: "image/jpeg",
+        coverVersion: 3,
+      },
+    });
+
+    const res = await libraryRoutes.request(`/mangas/${manga.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ coverUrl: "https://cdn.example.com/new.jpg" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(mangaSchema.parse(await res.json()).coverVersion).toBe(4);
+    const stored = await prisma.manga.findUniqueOrThrow({
+      where: { id: manga.id },
+    });
+    expect(stored.coverImage).toBeNull();
+    expect(stored.coverImageType).toBeNull();
+  });
+
   it("rejects an empty body, an invalid status and blank names", async () => {
     const manga = await seedManga("one-piece", "One Piece", []);
 
@@ -442,6 +469,158 @@ describe("fetchMangaCover", () => {
 
     expect(await fetchMangaCover(uncovered.id, fetchFn)).toBeNull();
     expect(await fetchMangaCover("nope", fetchFn)).toBeNull();
+  });
+
+  it("walks every reading site's referer after a site migration", async () => {
+    const manga = await prisma.manga.create({
+      data: {
+        canonicalName: "Un Niño Criado",
+        normalizedSlug: "un-nino-criado",
+        coverUrl: COVER_URL,
+        events: {
+          create: [
+            {
+              chapterLabel: "Cap. 57",
+              chapterNumber: 57,
+              sourceUrl: "https://lectorxd.com/manhua/un-nio/leer/57",
+              sourceDomain: "lectorxd.com",
+              readAt: new Date("2026-07-19T10:00:00.000Z"),
+            },
+            {
+              chapterLabel: "Cap. 55",
+              chapterNumber: 55,
+              sourceUrl: "https://manhwaweb.com/leer/un-nio_55",
+              sourceDomain: "manhwaweb.com",
+              readAt: new Date("2026-07-10T10:00:00.000Z"),
+            },
+          ],
+        },
+      },
+    });
+    const referers: (string | null)[] = [];
+    const fetchFn = async (_url: string, init?: RequestInit) => {
+      const referer = new Headers(init?.headers).get("referer");
+      referers.push(referer);
+      // The cover's own CDN (img2mw = manhwaweb) only accepts its referer.
+      return referer === "https://manhwaweb.com/"
+        ? imageResponse()
+        : new Response("blocked", { status: 403 });
+    };
+
+    const cover = await fetchMangaCover(manga.id, fetchFn);
+
+    expect(referers).toEqual([
+      "https://lectorxd.com/",
+      "https://manhwaweb.com/",
+    ]);
+    expect(cover?.contentType).toBe("image/webp");
+  });
+
+  it("persists the proxied bytes so the CDN is fetched at most once", async () => {
+    const manga = await seedCoveredManga();
+
+    const first = await fetchMangaCover(manga.id, async () => imageResponse());
+    expect(first).not.toBeNull();
+
+    const stored = await prisma.manga.findUniqueOrThrow({
+      where: { id: manga.id },
+    });
+    expect(stored.coverImage).not.toBeNull();
+    expect(stored.coverImageType).toBe("image/webp");
+    expect(stored.coverVersion).toBe(1);
+
+    const fetchFn = async (): Promise<Response> => {
+      throw new Error("must not be called");
+    };
+    const second = await fetchMangaCover(manga.id, fetchFn);
+    expect(second?.contentType).toBe("image/webp");
+  });
+
+  it("returns stored bytes without fetching when coverImage is present", async () => {
+    const manga = await seedCoveredManga();
+    await prisma.manga.update({
+      where: { id: manga.id },
+      data: { coverImage: COVER_BYTES, coverImageType: "image/png" },
+    });
+    const fetchFn = async (): Promise<Response> => {
+      throw new Error("must not be called");
+    };
+
+    const cover = await fetchMangaCover(manga.id, fetchFn);
+
+    expect(cover?.contentType).toBe("image/png");
+    expect(new Uint8Array(cover?.body ?? new ArrayBuffer(0))).toEqual(
+      COVER_BYTES,
+    );
+  });
+});
+
+describe("PUT /mangas/{id}/cover-image", () => {
+  const PNG_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+
+  function putCoverImage(
+    id: string,
+    body: Uint8Array | string,
+    contentType: string,
+  ) {
+    return libraryRoutes.request(`/mangas/${id}/cover-image`, {
+      method: "PUT",
+      headers: { "Content-Type": contentType },
+      body,
+    });
+  }
+
+  it("stores the bytes, bumps the version and serves them from /cover", async () => {
+    const manga = await seedManga("solo-leveling", "Solo Leveling", []);
+
+    const res = await putCoverImage(manga.id, PNG_BYTES, "image/png");
+
+    expect(res.status).toBe(200);
+    const dto = mangaSchema.parse(await res.json());
+    expect(dto.coverVersion).toBe(1);
+
+    const coverRes = await libraryRoutes.request(`/mangas/${manga.id}/cover`);
+    expect(coverRes.status).toBe(200);
+    expect(coverRes.headers.get("content-type")).toBe("image/png");
+    expect(new Uint8Array(await coverRes.arrayBuffer())).toEqual(PNG_BYTES);
+  });
+
+  it("rejects a non-image content type", async () => {
+    const manga = await seedManga("solo-leveling", "Solo Leveling", []);
+
+    const res = await putCoverImage(manga.id, "not an image", "text/plain");
+
+    expect(res.status).toBe(400);
+    errorSchema.parse(await res.json());
+  });
+
+  it("rejects an empty body", async () => {
+    const manga = await seedManga("solo-leveling", "Solo Leveling", []);
+
+    const res = await putCoverImage(manga.id, new Uint8Array(0), "image/png");
+
+    expect(res.status).toBe(400);
+    errorSchema.parse(await res.json());
+  });
+
+  it("rejects an oversized body", async () => {
+    const manga = await seedManga("solo-leveling", "Solo Leveling", []);
+
+    const res = await putCoverImage(
+      manga.id,
+      new Uint8Array(5 * 1024 * 1024 + 1),
+      "image/png",
+    );
+
+    expect(res.status).toBe(413);
+    errorSchema.parse(await res.json());
+  });
+
+  it("responds 404 for an unknown manga", async () => {
+    const res = await putCoverImage("nope", PNG_BYTES, "image/png");
+
+    expect(res.status).toBe(404);
+    errorSchema.parse(await res.json());
   });
 });
 

@@ -21,6 +21,12 @@ model Manga {
   normalizedSlug String   @unique
   // Cover image reported by the extension (og:image of a chapter page)
   coverUrl       String?
+  // Cover bytes captured by the extension in the real browser — the only
+  // client Cloudflare-walled CDNs admit. Served before proxying coverUrl.
+  coverImage     Bytes?
+  coverImageType String?
+  // Bumped on every cover mutation; the dashboard cache-busts /cover with it.
+  coverVersion   Int      @default(0)
   // Manual reading status: "reading" | "completed" | "dropped"
   status         String   @default("reading")
   // Manual tags as a JSON array of strings (SQLite has no array columns)
