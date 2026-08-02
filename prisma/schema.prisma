@@ -32,6 +32,16 @@ model Manga {
   // Manual tags as a JSON array of strings (SQLite has no array columns)
   tags           String   @default("[]")
   createdAt      DateTime @default(now())
+  // Last-write-wins tiebreaker when two machines edited the same manga.
+  // Deliberately NOT @updatedAt: that attribute overwrites the value on every
+  // write, so applying a peer's document would stamp it as "just modified" and
+  // the two machines would push it back and forth forever. Every writer sets
+  // it explicitly instead.
+  updatedAt      DateTime @default(now())
+  // Soft delete, so a deletion is a fact that syncs like any other field
+  // rather than something inferred from a row being absent — absence is
+  // ambiguous across machines and used to mean "delete this from the replica".
+  deletedAt      DateTime?
 
   events ReadingEvent[]
 }
@@ -72,5 +82,7 @@ model SiteAdapter {
   chapterUrlRegex String?
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  // Same reasoning as Manga.updatedAt: set explicitly, never by @updatedAt, so
+  // a document pulled from a peer keeps the timestamp that decides who wins.
+  updatedAt DateTime @default(now())
 }

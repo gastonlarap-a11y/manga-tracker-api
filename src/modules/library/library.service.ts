@@ -46,7 +46,9 @@ export interface UpdateMangaInput {
 export async function getLibrary(
   filters: LibraryFilters,
 ): Promise<LibraryProjection[]> {
-  const conditions = [];
+  // Soft-deleted mangas are invisible everywhere they used to be gone: the row
+  // only survives so the deletion can reach the other machines.
+  const conditions: object[] = [{ deletedAt: null }];
   if (filters.domain) {
     conditions.push({ events: { some: { sourceDomain: filters.domain } } });
   }
@@ -55,7 +57,7 @@ export async function getLibrary(
   }
 
   const mangas = await prisma.manga.findMany({
-    where: conditions.length > 0 ? { AND: conditions } : undefined,
+    where: { AND: conditions },
     include: { events: { orderBy: { readAt: "desc" } } },
     orderBy: { createdAt: "asc" },
   });
@@ -76,7 +78,7 @@ export async function getMangaHistory(
     where: { id },
     include: { events: { orderBy: { readAt: "desc" } } },
   });
-  if (!manga) {
+  if (!manga || manga.deletedAt !== null) {
     return null;
   }
   const { events, ...rest } = manga;
@@ -94,12 +96,15 @@ export async function updateManga(
   input: UpdateMangaInput,
 ): Promise<Manga | null> {
   const existing = await prisma.manga.findUnique({ where: { id } });
-  if (!existing) {
+  if (!existing || existing.deletedAt !== null) {
     return null;
   }
   const manga = await prisma.manga.update({
     where: { id },
     data: {
+      // Every writer stamps updatedAt by hand — see the schema comment on why
+      // @updatedAt would break convergence between machines.
+      updatedAt: new Date(),
       ...(input.canonicalName !== undefined
         ? { canonicalName: input.canonicalName }
         : {}),
@@ -132,7 +137,7 @@ export async function storeMangaCoverImage(
   contentType: string,
 ): Promise<Manga | null> {
   const existing = await prisma.manga.findUnique({ where: { id } });
-  if (!existing) {
+  if (!existing || existing.deletedAt !== null) {
     return null;
   }
   const manga = await prisma.manga.update({
@@ -141,6 +146,7 @@ export async function storeMangaCoverImage(
       coverImage: new Uint8Array(bytes),
       coverImageType: contentType,
       coverVersion: { increment: 1 },
+      updatedAt: new Date(),
     },
   });
   publishLibraryChanged();
@@ -249,6 +255,7 @@ export async function fetchMangaCover(
       coverImage: new Uint8Array(body),
       coverImageType: contentType,
       coverVersion: { increment: 1 },
+      updatedAt: new Date(),
     },
   });
   publishLibraryChanged();
@@ -276,15 +283,24 @@ async function fetchCover(
 }
 
 /**
- * Explicit user deletion from the dashboard; events fall with the manga via
- * onDelete: Cascade. This is the one sanctioned way data leaves the log.
+ * Explicit user deletion from the dashboard. Soft: the manga disappears
+ * everywhere it used to, but the row stays so the deletion can travel to the
+ * other machines as a fact. Absence cannot carry that meaning — a manga missing
+ * from one machine usually just means it has not synced yet.
+ *
+ * Events are left alone, which also keeps the append-only log intact: reading
+ * the manga again resurrects it with its history (see recordReadingEvent).
  */
 export async function deleteManga(id: string): Promise<boolean> {
   const existing = await prisma.manga.findUnique({ where: { id } });
-  if (!existing) {
+  if (!existing || existing.deletedAt !== null) {
     return false;
   }
-  await prisma.manga.delete({ where: { id } });
+  const now = new Date();
+  await prisma.manga.update({
+    where: { id },
+    data: { deletedAt: now, updatedAt: now },
+  });
   publishLibraryChanged();
   return true;
 }

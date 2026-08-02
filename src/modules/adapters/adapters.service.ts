@@ -28,6 +28,9 @@ export function upsertAdapter(input: UpsertAdapterInput): Promise<SiteAdapter> {
     titleSelector: input.titleSelector,
     chapterSelector: input.chapterSelector ?? null,
     chapterUrlRegex: input.chapterUrlRegex ?? null,
+    // Stamped by hand rather than by @updatedAt so a document pulled from
+    // another machine keeps the timestamp that decides who wins.
+    updatedAt: new Date(),
   };
   return prisma.siteAdapter.upsert({
     where: { domain },

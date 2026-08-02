@@ -414,10 +414,17 @@ reconstruye con `POST /api/sync/restore`. Da lo mismo que buscaba el export (por
 además durabilidad fuera de la máquina, sin un formato de archivo propio que mantener.
 
 Decisiones que quedaron fijadas al implementarla:
-- **Push-only.** SQLite es la única fuente de verdad para leer y escribir; la nube nunca está en
-  el camino de un request. Se descartó el dual-read ("si hay internet leo de Azure") porque sin
-  transacción entre archivo local y cluster remoto las copias divergen y la biblioteca pasaría a
-  depender de la conectividad.
+- **La nube nunca está en el camino de un request.** SQLite contesta todas las lecturas y
+  escrituras. Se descartó el dual-read ("si hay internet leo de Azure") porque sin transacción
+  entre archivo local y cluster remoto las copias divergen y la biblioteca pasaría a depender de
+  la conectividad.
+- **Sincronización bidireccional**, no réplica: cada corrida trae, mezcla y después empuja, así
+  cambiar de computador no requiere ninguna acción. Eventos por unión de conjuntos, mangas y
+  adapters por `updatedAt` más nuevo, borrado como `deletedAt`, documentos identificados por
+  `normalizedSlug`.
+- **Nada se borra nunca por estar ausente de un lado.** La primera versión sí lo hacía, y eso
+  implicaba que volver a una PC desactualizada y leer un capítulo borraba de la nube lo leído en
+  la otra.
 - **No se migró a Mongo.** Prisma 7 no soporta MongoDB (la doc oficial manda 6.19), y migrar
   habría implicado degradar Prisma o reescribir los 4 services y el arnés de tests, sin ningún
   problema de escala que lo justifique.

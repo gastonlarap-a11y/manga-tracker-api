@@ -1,226 +1,281 @@
+// The fake target doubles as "the other machine": a test writes documents into
+// it to stand for what a peer pushed, then syncs and asserts what this machine
+// did with them.
 import { beforeEach, describe, expect, it } from "bun:test";
 import { prisma } from "../../db/client";
 import { createFakeTarget, type FakeTarget } from "./sync.fake-target";
-import { pushToReplica, restoreFromReplica } from "./sync.service";
+import type { MangaDoc, ReadingEventDoc } from "./sync.mapper";
+import { restoreFromReplica, syncWithReplica } from "./sync.service";
 
-/**
- * Steady state for most tests: a machine that holds data and whose deletions
- * should reach the replica. The guards that hold deletions back are exercised
- * on their own below.
- */
-const push = async (target: FakeTarget, covers = false) => {
-  const outcome = await pushToReplica(target, { covers, allowDeletions: true });
-  if (outcome.kind !== "pushed") {
-    throw new Error(`expected a push, got "${outcome.kind}"`);
-  }
-  return outcome;
-};
+const sync = (target: FakeTarget, covers = false) =>
+  syncWithReplica(target, { covers });
 
-const seed = async () => {
+const seedLocal = async () => {
   const manga = await prisma.manga.create({
     data: {
       canonicalName: "One Piece",
       normalizedSlug: "one-piece",
-      coverUrl: "https://cdn.example/op.jpg",
       tags: JSON.stringify(["shonen"]),
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+      updatedAt: new Date("2026-01-01T00:00:00.000Z"),
     },
   });
   await prisma.readingEvent.createMany({
     data: [
       {
+        id: "local-event-1",
         mangaId: manga.id,
         chapterLabel: "Cap. 1",
         chapterNumber: 1,
         sourceUrl: "https://olympusxyz.com/op/1",
         sourceDomain: "olympusxyz.com",
       },
-      {
-        mangaId: manga.id,
-        chapterLabel: "Cap. 2",
-        chapterNumber: 2,
-        sourceUrl: "https://olympusxyz.com/op/2",
-        sourceDomain: "olympusxyz.com",
-      },
     ],
-  });
-  await prisma.siteAdapter.create({
-    data: { domain: "olympusxyz.com", titleSelector: "h1.title" },
   });
   return manga;
 };
+
+/** A manga document as another machine would have written it. */
+const peerManga = (over: Partial<MangaDoc> = {}): MangaDoc => ({
+  _id: "solo-leveling",
+  id: "peer-uuid",
+  canonicalName: "Solo Leveling",
+  coverUrl: null,
+  coverImageType: null,
+  coverVersion: 0,
+  hasStoredCover: false,
+  status: "reading",
+  tags: [],
+  createdAt: new Date("2026-01-05T00:00:00.000Z"),
+  updatedAt: new Date("2026-01-05T00:00:00.000Z"),
+  deletedAt: null,
+  ...over,
+});
+
+const peerEvent = (over: Partial<ReadingEventDoc> = {}): ReadingEventDoc => ({
+  _id: "peer-event-1",
+  mangaSlug: "solo-leveling",
+  chapterLabel: "Cap. 179",
+  chapterNumber: 179,
+  sourceUrl: "https://olympusxyz.com/sl/179",
+  sourceDomain: "olympusxyz.com",
+  readAt: new Date("2026-02-01T00:00:00.000Z"),
+  ...over,
+});
 
 beforeEach(async () => {
   await prisma.manga.deleteMany();
   await prisma.siteAdapter.deleteMany();
 });
 
-describe("Sync service: push", () => {
-  it("should seed an empty replica with everything already in SQLite", async () => {
-    await seed();
+describe("Sync: the reason this exists — a stale machine must not destroy history", () => {
+  it("should never remove a peer's events just because they are missing here", async () => {
     const target = createFakeTarget();
+    await seedLocal();
+    await sync(target);
 
-    const result = await push(target);
+    // The other machine recorded chapters this one has never seen.
+    target.mangas.set("solo-leveling", peerManga());
+    target.events.set("peer-event-1", peerEvent());
+    target.events.set("peer-event-2", peerEvent({ _id: "peer-event-2" }));
 
-    expect(result.mangas.upserted).toBe(1);
-    expect(result.events.inserted).toBe(2);
-    expect(result.adapters.upserted).toBe(1);
-    expect(target.mangas.size).toBe(1);
-    expect(target.events.size).toBe(2);
-    expect(target.adapters.size).toBe(1);
-    // Metadata push never carries bytes.
-    expect(target.covers.size).toBe(0);
-    expect(result.covers).toBe(null);
+    const result = await sync(target);
+
+    // Regression: this used to delete both as "absent locally".
+    expect(target.events.size).toBe(3);
+    expect(result.pulled.events).toBe(2);
+    expect(await prisma.readingEvent.count()).toBe(3);
   });
 
-  it("should translate the library into replica-native shapes", async () => {
-    const manga = await seed();
+  it("should bring a stale machine up to date before it pushes anything", async () => {
     const target = createFakeTarget();
+    await seedLocal();
+    await sync(target);
+    target.mangas.set("solo-leveling", peerManga());
+    target.events.set("peer-event-1", peerEvent());
 
-    await push(target);
-    const doc = target.mangas.get(manga.id);
+    await sync(target);
 
-    expect(doc?.normalizedSlug).toBe("one-piece");
-    // A real array, not the JSON string SQLite has to store.
-    expect(doc?.tags).toEqual(["shonen"]);
-    expect(doc?.hasStoredCover).toBe(false);
+    // The peer's manga now exists here, with this machine's own uuid, and its
+    // event hangs off it.
+    const pulledManga = await prisma.manga.findUniqueOrThrow({
+      where: { normalizedSlug: "solo-leveling" },
+      include: { events: true },
+    });
+    expect(pulledManga.canonicalName).toBe("Solo Leveling");
+    expect(pulledManga.events).toHaveLength(1);
+    expect(pulledManga.events[0]?.chapterLabel).toBe("Cap. 179");
   });
 
-  it("should move nothing on a second push (idempotent)", async () => {
-    await seed();
+  it("should merge two machines that discovered the same title separately", async () => {
     const target = createFakeTarget();
-
-    await push(target);
-    // The fake throws on a duplicate event insert, so a re-send fails loudly.
-    const second = await push(target);
-
-    expect(second.events.inserted).toBe(0);
-    expect(second.events.deleted).toBe(0);
-    expect(second.mangas.deleted).toBe(0);
-    expect(second.adapters.deleted).toBe(0);
-    expect(target.calls.eventsInserted).toBe(2);
-  });
-
-  it("should push only events appended since the last push", async () => {
-    const manga = await seed();
-    const target = createFakeTarget();
-    await push(target);
-
-    await prisma.readingEvent.create({
+    // The peer already knows this title under its own uuid.
+    target.mangas.set(
+      "solo-leveling",
+      peerManga({ updatedAt: new Date("2026-01-05T00:00:00.000Z") }),
+    );
+    // This machine created it independently: different uuid, same slug.
+    await prisma.manga.create({
       data: {
-        mangaId: manga.id,
-        chapterLabel: "Cap. 3",
-        chapterNumber: 3,
-        sourceUrl: "https://olympusxyz.com/op/3",
-        sourceDomain: "olympusxyz.com",
+        canonicalName: "Solo Leveling",
+        normalizedSlug: "solo-leveling",
+        createdAt: new Date("2026-01-06T00:00:00.000Z"),
+        updatedAt: new Date("2026-01-06T00:00:00.000Z"),
       },
     });
 
-    expect((await push(target)).events.inserted).toBe(1);
-    expect(target.events.size).toBe(3);
+    await sync(target);
+
+    // One manga, not a unique-index crash: the slug is the shared identity.
+    expect(await prisma.manga.count()).toBe(1);
+    expect(target.mangas.size).toBe(1);
+  });
+});
+
+describe("Sync: events converge as a union", () => {
+  it("should move new events in both directions at once", async () => {
+    const target = createFakeTarget();
+    await seedLocal();
+    target.mangas.set("solo-leveling", peerManga());
+    target.events.set("peer-event-1", peerEvent());
+
+    const result = await sync(target);
+
+    expect(result.pulled.events).toBe(1);
+    expect(result.pushed.events).toBe(1);
+    expect(await prisma.readingEvent.count()).toBe(2);
+    expect(target.events.size).toBe(2);
   });
 
-  it("should cascade a local manga deletion into the replica", async () => {
-    const manga = await seed();
+  it("should move nothing on a second sync", async () => {
     const target = createFakeTarget();
-    await push(target);
+    await seedLocal();
+    await sync(target);
 
-    await prisma.manga.delete({ where: { id: manga.id } });
-    const result = await push(target);
+    // The fake throws on a duplicate event insert, so a re-send fails loudly.
+    const second = await sync(target);
 
-    expect(result.mangas.deleted).toBe(1);
-    // The replica has no foreign keys; the orphaned events only go away
-    // because the key diff catches them.
-    expect(result.events.deleted).toBe(2);
-    expect(target.mangas.size).toBe(0);
-    expect(target.events.size).toBe(0);
+    expect(second.pulled).toEqual({
+      mangas: 0,
+      events: 0,
+      adapters: 0,
+      covers: 0,
+    });
+    expect(second.pushed.events).toBe(0);
+    expect(second.pushed.mangas).toBe(0);
+  });
+});
+
+describe("Sync: last-write-wins on mutable fields", () => {
+  it("should let a newer peer edit overwrite this machine", async () => {
+    const target = createFakeTarget();
+    const manga = await seedLocal();
+    await sync(target);
+
+    target.mangas.set(
+      "one-piece",
+      peerManga({
+        _id: "one-piece",
+        canonicalName: "One Piece",
+        status: "completed",
+        tags: ["done"],
+        updatedAt: new Date("2026-06-01T00:00:00.000Z"),
+      }),
+    );
+    const result = await sync(target);
+
+    const merged = await prisma.manga.findUniqueOrThrow({
+      where: { id: manga.id },
+    });
+    expect(merged.status).toBe("completed");
+    expect(merged.tags).toBe('["done"]');
+    expect(result.pulled.mangas).toBe(1);
   });
 
-  it("should propagate edits to mutable manga fields", async () => {
-    const manga = await seed();
+  it("should keep this machine's edit when the peer's is older", async () => {
     const target = createFakeTarget();
-    await push(target);
+    const manga = await seedLocal();
+    await sync(target);
 
     await prisma.manga.update({
       where: { id: manga.id },
-      data: { status: "completed", tags: JSON.stringify(["done", "pirates"]) },
+      data: {
+        status: "dropped",
+        updatedAt: new Date("2026-06-01T00:00:00.000Z"),
+      },
     });
-    await push(target);
+    target.mangas.set(
+      "one-piece",
+      peerManga({
+        _id: "one-piece",
+        status: "completed",
+        updatedAt: new Date("2026-03-01T00:00:00.000Z"),
+      }),
+    );
 
-    expect(target.mangas.get(manga.id)?.status).toBe("completed");
-    expect(target.mangas.get(manga.id)?.tags).toEqual(["done", "pirates"]);
+    await sync(target);
+
+    expect(
+      (await prisma.manga.findUniqueOrThrow({ where: { id: manga.id } }))
+        .status,
+    ).toBe("dropped");
+    // And the shared store now carries the winner.
+    expect(target.mangas.get("one-piece")?.status).toBe("dropped");
   });
 });
 
-describe("Sync service: deletion guards", () => {
-  // Regression: the first boot on a fresh machine used to mirror an empty
-  // SQLite over the replica, destroying the backup it was installed to read.
-  it("should refuse to push at all from an empty local database", async () => {
+describe("Sync: deletion travels as a value", () => {
+  it("should apply a peer's deletion and hide the manga here", async () => {
     const target = createFakeTarget();
-    await seed();
-    await push(target);
-    await prisma.manga.deleteMany();
-    await prisma.siteAdapter.deleteMany();
+    await seedLocal();
+    await sync(target);
 
-    const outcome = await pushToReplica(target, {
-      covers: true,
-      allowDeletions: true,
+    target.mangas.set(
+      "one-piece",
+      peerManga({
+        _id: "one-piece",
+        canonicalName: "One Piece",
+        deletedAt: new Date("2026-06-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-01T00:00:00.000Z"),
+      }),
+    );
+    await sync(target);
+
+    const merged = await prisma.manga.findUniqueOrThrow({
+      where: { normalizedSlug: "one-piece" },
     });
-
-    expect(outcome).toEqual({ kind: "skipped", reason: "local-empty" });
-    // The replica is untouched and still restorable.
-    expect(target.mangas.size).toBe(1);
-    expect(target.events.size).toBe(2);
-    expect(target.adapters.size).toBe(1);
+    expect(merged.deletedAt).not.toBe(null);
+    // The events stay: the log is append-only and the manga may come back.
+    expect(await prisma.readingEvent.count()).toBe(1);
   });
 
-  it("should leave the replica intact on an additive-only push", async () => {
+  it("should not let a deletion be undone by the next sync", async () => {
     const target = createFakeTarget();
-    await seed();
-    await push(target);
+    const manga = await seedLocal();
+    await sync(target);
 
-    // A second machine holding only part of the library, as after a partial
-    // restore or before one.
-    await prisma.manga.deleteMany();
-    const kept = await prisma.manga.create({
-      data: { canonicalName: "Kept", normalizedSlug: "kept" },
+    await prisma.manga.update({
+      where: { id: manga.id },
+      data: {
+        deletedAt: new Date("2026-06-01T00:00:00.000Z"),
+        updatedAt: new Date("2026-06-01T00:00:00.000Z"),
+      },
     });
+    await sync(target);
+    await sync(target);
 
-    const outcome = await pushToReplica(target, {
-      covers: false,
-      allowDeletions: false,
-    });
-
-    expect(outcome.kind).toBe("pushed");
-    expect(outcome.kind === "pushed" && outcome.deletionsApplied).toBe(false);
-    // The new manga arrives; nothing the replica already held is removed.
-    expect(target.mangas.size).toBe(2);
-    expect(target.mangas.has(kept.id)).toBe(true);
-    expect(target.events.size).toBe(2);
-  });
-
-  it("should report zero deletions rather than counting what it withheld", async () => {
-    const target = createFakeTarget();
-    const manga = await seed();
-    await push(target);
-
-    await prisma.manga.delete({ where: { id: manga.id } });
-    await prisma.siteAdapter.create({
-      data: { domain: "other.com", titleSelector: "h1" },
-    });
-    const outcome = await pushToReplica(target, {
-      covers: false,
-      allowDeletions: false,
-    });
-
-    expect(outcome.kind === "pushed" && outcome.mangas.deleted).toBe(0);
-    expect(outcome.kind === "pushed" && outcome.events.deleted).toBe(0);
-    expect(target.mangas.size).toBe(1);
+    expect(target.mangas.get("one-piece")?.deletedAt).not.toBe(null);
+    expect(
+      (await prisma.manga.findUniqueOrThrow({ where: { id: manga.id } }))
+        .deletedAt,
+    ).not.toBe(null);
   });
 });
 
-describe("Sync service: cover pass", () => {
-  it("should upload cover bytes only when the pass is requested", async () => {
-    const manga = await seed();
+describe("Sync: cover bytes", () => {
+  it("should leave bytes alone unless the cover pass is requested", async () => {
+    const target = createFakeTarget();
+    const manga = await seedLocal();
     await prisma.manga.update({
       where: { id: manga.id },
       data: {
@@ -229,70 +284,65 @@ describe("Sync service: cover pass", () => {
         coverVersion: 1,
       },
     });
-    const target = createFakeTarget();
 
-    await push(target);
+    await sync(target);
     expect(target.covers.size).toBe(0);
     // The flag rides along with the metadata even when the bytes do not.
-    expect(target.mangas.get(manga.id)?.hasStoredCover).toBe(true);
+    expect(target.mangas.get("one-piece")?.hasStoredCover).toBe(true);
 
-    const withCovers = await push(target, true);
-
-    expect(withCovers.covers).toEqual({ uploaded: 1, deleted: 0 });
-    expect(Array.from(target.covers.get(manga.id)?.data ?? [])).toEqual([
+    const withCovers = await sync(target, true);
+    expect(withCovers.pushed.covers).toBe(1);
+    expect(Array.from(target.covers.get("one-piece")?.data ?? [])).toEqual([
       1, 2, 3,
     ]);
   });
 
-  it("should skip covers whose version did not move", async () => {
-    const manga = await seed();
-    await prisma.manga.update({
-      where: { id: manga.id },
-      data: { coverImage: new Uint8Array([1]), coverVersion: 1 },
-    });
+  it("should pull a peer's cover that this machine lacks", async () => {
     const target = createFakeTarget();
-    await push(target, true);
-
-    const second = await push(target, true);
-    expect(second.covers?.uploaded).toBe(0);
-    expect(target.calls.coversUploaded).toBe(1);
-
-    await prisma.manga.update({
-      where: { id: manga.id },
-      data: { coverImage: new Uint8Array([2, 2]), coverVersion: 2 },
+    await seedLocal();
+    target.mangas.set(
+      "solo-leveling",
+      peerManga({ hasStoredCover: true, coverVersion: 2 }),
+    );
+    target.covers.set("solo-leveling", {
+      _id: "solo-leveling",
+      data: new Uint8Array([4, 5, 6]),
+      contentType: "image/png",
+      coverVersion: 2,
     });
-    const third = await push(target, true);
 
-    expect(third.covers?.uploaded).toBe(1);
-    expect(Array.from(target.covers.get(manga.id)?.data ?? [])).toEqual([2, 2]);
+    const result = await sync(target, true);
+
+    expect(result.pulled.covers).toBe(1);
+    const pulled = await prisma.manga.findUniqueOrThrow({
+      where: { normalizedSlug: "solo-leveling" },
+    });
+    expect(Array.from(pulled.coverImage ?? [])).toEqual([4, 5, 6]);
+    expect(pulled.coverImageType).toBe("image/png");
   });
 
-  it("should prune an orphaned cover on a metadata push, without moving bytes", async () => {
-    const manga = await seed();
+  it("should skip covers whose version did not move", async () => {
+    const target = createFakeTarget();
+    const manga = await seedLocal();
     await prisma.manga.update({
       where: { id: manga.id },
       data: { coverImage: new Uint8Array([1]), coverVersion: 1 },
     });
-    const target = createFakeTarget();
-    await push(target, true);
-    expect(target.covers.size).toBe(1);
+    await sync(target, true);
 
-    await prisma.manga.update({
-      where: { id: manga.id },
-      data: { coverImage: null, coverVersion: 2 },
-    });
-    await push(target);
+    const second = await sync(target, true);
 
-    expect(target.covers.size).toBe(0);
-    expect(target.mangas.get(manga.id)?.hasStoredCover).toBe(false);
+    expect(second.pushed.covers).toBe(0);
+    expect(second.pulled.covers).toBe(0);
+    expect(target.calls.coversUploaded).toBe(1);
   });
 });
 
-describe("Sync service: restore", () => {
-  it("should refuse to overwrite a populated database", async () => {
-    await seed();
+describe("Sync: restore", () => {
+  it("should refuse to replace a populated database", async () => {
     const target = createFakeTarget();
-    await push(target);
+    await seedLocal();
+    await sync(target);
 
     const outcome = await restoreFromReplica(target);
 
@@ -300,80 +350,37 @@ describe("Sync service: restore", () => {
     expect(await prisma.manga.count()).toBe(1);
   });
 
-  it("should rebuild the library from the replica into an empty database", async () => {
-    const manga = await seed();
-    await prisma.manga.update({
-      where: { id: manga.id },
-      data: {
-        coverImage: new Uint8Array([7, 7, 7]),
-        coverImageType: "image/png",
-        coverVersion: 4,
-      },
-    });
+  it("should rebuild the library from the shared store when forced", async () => {
     const target = createFakeTarget();
-    await push(target, true);
-
-    // Simulate a fresh machine: same replica, nothing local.
-    await prisma.manga.deleteMany();
-    await prisma.siteAdapter.deleteMany();
-
-    const outcome = await restoreFromReplica(target);
-
-    expect(outcome).toEqual({
-      kind: "restored",
-      mangas: 1,
-      events: 2,
-      adapters: 1,
-      covers: 1,
-    });
-
-    const restored = await prisma.manga.findUniqueOrThrow({
-      where: { id: manga.id },
-      include: { events: true },
-    });
-    expect(restored.canonicalName).toBe("One Piece");
-    expect(restored.normalizedSlug).toBe("one-piece");
-    // Back to the JSON string the column holds.
-    expect(restored.tags).toBe('["shonen"]');
-    expect(restored.coverVersion).toBe(4);
-    expect(restored.coverImageType).toBe("image/png");
-    expect(Array.from(restored.coverImage ?? [])).toEqual([7, 7, 7]);
-    expect(restored.events).toHaveLength(2);
-    expect(await prisma.siteAdapter.count()).toBe(1);
-  });
-
-  it("should overwrite a populated database when forced", async () => {
-    await seed();
-    const target = createFakeTarget();
-    await push(target);
+    await seedLocal();
+    await sync(target, true);
 
     await prisma.manga.create({
       data: { canonicalName: "Local Only", normalizedSlug: "local-only" },
     });
-
     const outcome = await restoreFromReplica(target, { force: true });
 
     expect(outcome.kind).toBe("restored");
-    // The local-only manga is gone: a forced restore is a replacement.
+    // A forced restore is a replacement: the local-only manga is gone.
     expect(await prisma.manga.count()).toBe(1);
     expect(
       await prisma.manga.findFirst({ where: { normalizedSlug: "local-only" } }),
     ).toBe(null);
+    expect(await prisma.readingEvent.count()).toBe(1);
   });
 
-  it("should survive a round trip that leaves the replica unchanged", async () => {
-    await seed();
+  it("should reconstruct an empty machine and then have nothing left to do", async () => {
     const target = createFakeTarget();
-    await push(target);
+    await seedLocal();
+    await sync(target);
 
     await prisma.manga.deleteMany();
-    await prisma.siteAdapter.deleteMany();
     await restoreFromReplica(target);
 
-    // Restored rows keep their ids, so the next push has nothing to do.
-    const after = await push(target);
-    expect(after.events.inserted).toBe(0);
-    expect(after.mangas.deleted).toBe(0);
-    expect(after.events.deleted).toBe(0);
+    // Ids are preserved through the store, so the next sync is a no-op.
+    const after = await sync(target);
+    expect(after.pulled.events).toBe(0);
+    expect(after.pushed.events).toBe(0);
+    expect(await prisma.readingEvent.count()).toBe(1);
   });
 });

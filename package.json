@@ -8,7 +8,8 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "bunx --bun prisma generate",
     "db:migrate": "bunx --bun prisma migrate dev",
-    "sync:inspect": "bun run scripts/inspect-replica.ts"
+    "sync:inspect": "bun run scripts/inspect-replica.ts",
+    "sync:bootstrap": "bun run scripts/bootstrap-credentials.ts"
   },
   "dependencies": {
     "@hono/swagger-ui": "^0.6.1",

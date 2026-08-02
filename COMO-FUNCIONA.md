@@ -604,36 +604,51 @@ tu biblioteca se respalda sola, y migrar a otra Mac es literalmente copiar `mang
 a la misma carpeta. La base es un único archivo — por eso las portadas se guardan como bytes
 *dentro* de la base y no como archivos sueltos.
 
-La segunda es la réplica opcional en **Azure DocumentDB**, que cubre lo único que Time Machine
-no puede: perder la Mac entera, o el disco, entre snapshots. Se activa poniendo `MONGODB_URL`
-en el `.env`; sin esa variable el módulo queda completamente inerte y la app se comporta igual
+La segunda es la **sincronización con Azure DocumentDB**, que cubre dos cosas que Time Machine
+no puede: perder la Mac entera entre snapshots, y usar dos computadores. Se activa poniendo
+`MONGODB_URL`; sin esa variable el módulo queda completamente inerte y la app se comporta igual
 que antes de que existiera.
 
-Lo importante es qué **no** hace: la réplica es *push-only*. SQLite sigue contestando todas las
-lecturas y escrituras, y la nube nunca se mete en el camino de un request. Esto es deliberado.
-La alternativa tentadora — "si hay internet leo de Azure, si no leo de SQLite" — suena mejor y
-es peor: no existe transacción entre un archivo local y un cluster remoto, así que en cuanto
-una escritura remota falla (el free tier se pausa solo a los 60 días, la regla de firewall es
-por IP y tu IP es dinámica) las dos copias divergen, y a partir de ahí tu biblioteca mostraría
-cosas distintas según si hay wifi. Capítulos que desaparecen al conectarte. En un tracker cuya
-única razón de existir es no perder el progreso, ese es el peor modo de falla posible.
+Lo primero que hay que entender es qué **no** hace: la nube nunca se mete en el camino de un
+request. SQLite sigue contestando todas las lecturas y escrituras. La alternativa tentadora —
+"si hay internet leo de Azure, si no leo de SQLite" — suena mejor y es peor: no existe
+transacción entre un archivo local y un cluster remoto, así que en cuanto una escritura remota
+falla las dos copias divergen, y desde ahí tu biblioteca mostraría cosas distintas según si hay
+wifi. Capítulos que desaparecen al conectarte. En un tracker cuya única razón de existir es no
+perder el progreso, ese es el peor modo de falla posible.
 
-El push es una **reconciliación completa por diferencia de claves**, no un feed de cambios: en
-cada corrida se leen solo los ids remotos, se comparan contra SQLite y se escribe la diferencia.
-Cuesta unos cientos de KB a este volumen, y a cambio no hace falta ninguna tabla de watermark,
-ninguna columna `updatedAt`, ninguna migración de Prisma — y un push que falló estando offline
-lo arregla entero el siguiente. Los eventos, al ser append-only con UUID inmutables, se
-reconcilian como una unión de conjuntos.
+Lo que sí hace es **converger**: cada sincronización primero trae lo que las otras máquinas
+escribieron, lo mezcla, y recién después empuja lo suyo. Las reglas son tres, y cada una sale de
+una propiedad del modelo de datos:
+
+- **Los eventos de lectura** son append-only con UUID inmutables, así que mezclarlos es la unión
+  de dos conjuntos. **Nada se borra jamás por estar ausente de un lado.** Esto no es un detalle:
+  la primera versión sí borraba lo ausente, y eso significaba que volver a una PC desactualizada
+  y leer un solo capítulo borraba de la nube todo lo leído en la otra. El código actual
+  directamente no tiene un método para borrar eventos.
+- **Mangas y adapters** son mutables, así que gana el `updatedAt` más nuevo. Esa columna la
+  escribe a mano cada writer, nunca `@updatedAt` de Prisma: ese atributo pisa el valor en cada
+  escritura, con lo cual aplicar el documento de la otra máquina lo dejaría como "recién
+  modificado" y las dos se lo pasarían de ida y vuelta para siempre.
+- **Borrar** un manga ya no borra la fila: le pone `deletedAt`. Así el borrado viaja como un
+  hecho y se resuelve con la misma regla que cualquier otro campo. Sus eventos quedan guardados,
+  y volver a leer la serie la resucita con todo su historial.
+
+Un detalle que evita un choque real: los documentos se identifican por `normalizedSlug`, no por
+el UUID local. Si descubrís el mismo manga en las dos PCs antes de sincronizar, se crean dos UUID
+distintos con el mismo slug; identificando por slug las dos escriben el **mismo** documento y se
+mezclan, en vez de chocar contra el índice único.
 
 Los bytes de portada viajan en una pasada aparte cada 6 h, no en cada cambio: medidos contra el
 cluster tardan ~790 ms por MB, y una portada puede pesar 5 MB. Ese tráfico periódico además
 evita que el cluster gratuito se pause por inactividad.
 
-Para volver a levantar todo en una Mac nueva: instalás, ponés las dos variables, arrancás la API
-y hacés `curl -X POST http://127.0.0.1:5150/api/sync/restore`. El restore reconstruye mangas,
-eventos, adapters y portadas conservando los ids originales.
+**Cambiar de computador no requiere hacer nada.** Instalás, corrés `bun run sync:bootstrap` para
+recuperar la credencial (la busca en el plist, después en el Llavero de macOS y por último en
+Azure Key Vault), arrancás la API y la primera sincronización trae la biblioteca entera. De ahí
+en adelante abrís la app en la máquina que estés usando y lo que leíste en la otra ya está. El
+endpoint `POST /api/sync/restore` sigue existiendo pero para otra cosa: tirar la base local a la
+basura y reconstruirla, por ejemplo si se corrompió.
 
-Un detalle de seguridad que costó encontrar y vale la pena saber: los borrados tienen doble
-candado. Una base local vacía **se niega a pushear** y el push de arranque es aditivo — nunca
-borra. Sin eso, arrancar por primera vez en la Mac nueva replicaba una base vacía sobre la nube
-y destruía el respaldo justo antes de poder leerlo.
+La única suposición del diseño es que el desempate por fecha usa el reloj de cada máquina. Con un
+solo usuario y dos Macs con NTP, sin editar el mismo manga en dos lados a la vez, es seguro.

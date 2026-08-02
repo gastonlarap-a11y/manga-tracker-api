@@ -16,14 +16,14 @@ describe("Sync routes with the replica not configured", () => {
     expect(body).toEqual({
       enabled: false,
       connected: false,
-      lastPushAt: null,
+      lastSyncAt: null,
       lastResult: null,
       lastError: null,
     });
   });
 
-  it("should refuse a push with 503 instead of failing obscurely", async () => {
-    const res = await syncRoutes.request("/sync/push", { method: "POST" });
+  it("should refuse a sync with 503 instead of failing obscurely", async () => {
+    const res = await syncRoutes.request("/sync/now", { method: "POST" });
 
     expect(res.status).toBe(503);
     expect(await res.json()).toEqual({
@@ -40,7 +40,7 @@ describe("Sync routes with the replica not configured", () => {
   });
 
   it("should reject an unknown value for the covers flag", async () => {
-    const res = await syncRoutes.request("/sync/push?covers=maybe", {
+    const res = await syncRoutes.request("/sync/now?covers=maybe", {
       method: "POST",
     });
 

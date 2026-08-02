@@ -1,6 +1,7 @@
-// In-memory SyncTarget for tests: it makes push/restore semantics verifiable
-// without a cluster, which matters because CI has none. It also counts calls,
-// so "the second push moved nothing" is an assertion rather than a hope.
+// In-memory SyncTarget for tests: it makes merge semantics verifiable without a
+// cluster, which matters because CI has none. It doubles as the stand-in for
+// "the other machine" — a test writes documents into it directly to simulate
+// what a peer pushed, then syncs and asserts what this machine did with them.
 import type {
   CoverDoc,
   MangaDoc,
@@ -24,6 +25,9 @@ export function createFakeTarget(): FakeTarget {
   const covers = new Map<string, CoverDoc>();
   const calls = { eventsInserted: 0, coversUploaded: 0 };
 
+  // Reads go through a clone so a test cannot accidentally assert on the very
+  // objects a push wrote; dates survive as ISO strings, which is also what a
+  // real driver hands back for anything it did not type as a Date.
   const clone = (doc: object): ReplicaDoc =>
     JSON.parse(JSON.stringify(doc)) as ReplicaDoc;
 
@@ -37,14 +41,27 @@ export function createFakeTarget(): FakeTarget {
     connect: async () => {},
     close: async () => {},
 
-    readKeys: async () => ({
-      mangaIds: new Set(mangas.keys()),
-      eventIds: new Set(events.keys()),
-      adapterDomains: new Set(adapters.keys()),
-      coverVersions: new Map(
-        [...covers.values()].map((doc) => [doc._id, doc.coverVersion]),
-      ),
-    }),
+    readMangas: async () => [...mangas.values()].map(clone),
+    readAdapters: async () => [...adapters.values()].map(clone),
+    readEventIds: async () => new Set(events.keys()),
+    readEventDocs: async (ids) =>
+      ids
+        .map((id) => events.get(id))
+        .filter((doc): doc is ReadingEventDoc => doc !== undefined)
+        .map(clone),
+    readCoverVersions: async () =>
+      new Map([...covers.values()].map((doc) => [doc._id, doc.coverVersion])),
+    readCover: async (slug) => {
+      const doc = covers.get(slug);
+      return doc === undefined
+        ? null
+        : {
+            _id: doc._id,
+            data: doc.data,
+            contentType: doc.contentType,
+            coverVersion: doc.coverVersion,
+          };
+    },
 
     upsertMangas: async (docs) => {
       for (const doc of docs) {
@@ -76,43 +93,10 @@ export function createFakeTarget(): FakeTarget {
       calls.coversUploaded += docs.length;
     },
 
-    deleteMangas: async (ids) => {
-      for (const id of ids) {
-        mangas.delete(id);
+    deleteCovers: async (slugs) => {
+      for (const slug of slugs) {
+        covers.delete(slug);
       }
-    },
-    deleteEvents: async (ids) => {
-      for (const id of ids) {
-        events.delete(id);
-      }
-    },
-    deleteAdapters: async (domains) => {
-      for (const domain of domains) {
-        adapters.delete(domain);
-      }
-    },
-    deleteCovers: async (ids) => {
-      for (const id of ids) {
-        covers.delete(id);
-      }
-    },
-
-    // Restore reads go through a clone so a test cannot accidentally assert on
-    // the very objects the push wrote; dates survive as ISO strings, which is
-    // also what a real driver hands back for anything it did not type as a Date.
-    readMangas: async () => [...mangas.values()].map(clone),
-    readEvents: async () => [...events.values()].map(clone),
-    readAdapters: async () => [...adapters.values()].map(clone),
-    readCover: async (mangaId) => {
-      const doc = covers.get(mangaId);
-      return doc === undefined
-        ? null
-        : {
-            _id: doc._id,
-            data: doc.data,
-            contentType: doc.contentType,
-            coverVersion: doc.coverVersion,
-          };
     },
   };
 }
