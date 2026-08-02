@@ -152,7 +152,11 @@ Tres tablas:
   extensión o que fijaste a mano), `status` (`"reading"` por defecto; también
   `"completed"` / `"dropped"`) y `tags` (un **string JSON** tipo `'["shonen","favs"]'` —
   SQLite no tiene columnas array ni enums, así que el array vive serializado y se valida en
-  los bordes, ver `src/lib/schemas.ts`).
+  los bordes, ver `src/lib/schemas.ts`). Además, el almacenamiento local de la portada:
+  `coverImage` + `coverImageType` (**Bytes** nullables — la imagen en sí, guardada en la
+  base para que el archivo `.db` siga siendo el backup completo) y `coverVersion` (entero
+  que se incrementa en **cada** mutación de portada; los clientes lo usan como
+  cache-buster de `/cover` y para reintentar una carga que antes falló).
 - **`ReadingEvent`** — el log append-only: `chapterLabel` (texto original, "Cap. 130.5"),
   `chapterNumber` (el número parseado, **nullable** si no se pudo parsear), `sourceUrl`,
   `sourceDomain` y `readAt`. Tiene dos detalles finos:
@@ -339,8 +343,9 @@ feed moría entre latidos y el dashboard se perdía los updates).
 |---|---|
 | `GET /api/library` | un array de entradas proyectadas (ver abajo); filtros opcionales `?domain=` y `?since=<fecha ISO>` |
 | `GET /api/mangas/{id}/history` | `{ manga, events }` con todos los eventos del más nuevo al más viejo · `404` si no existe |
-| `PUT /api/mangas/{id}` | correcciones manuales; body `{ canonicalName?, status?, tags?, coverUrl? }`, al menos un campo — `coverUrl: null` limpia la portada · `400`/`404` |
-| `GET /api/mangas/{id}/cover` | la imagen de portada, **proxeada** por el servidor para saltar el anti-hotlink (ver abajo) · `404` |
+| `PUT /api/mangas/{id}` | correcciones manuales; body `{ canonicalName?, status?, tags?, coverUrl? }`, al menos un campo — cambiar `coverUrl` (o limpiarlo con `null`) además descarta los bytes guardados de la portada vieja · `400`/`404` |
+| `PUT /api/mangas/{id}/cover-image` | sube los **bytes** de la portada (body binario `image/*`, tope de 5 MB vía middleware `bodyLimit`) — los captura la extensión dentro del navegador real, el único cliente que los CDNs con muro de Cloudflare aceptan · `400`/`404`/`413` |
+| `GET /api/mangas/{id}/cover` | la imagen de portada: los bytes guardados primero; si no hay, la **proxea** el servidor saltando el anti-hotlink (ver abajo) · `404` |
 | `DELETE /api/mangas/{id}` | borra el manga y TODA su historia (cascade) · `204`/`404` |
 
 **Service:**
@@ -359,7 +364,9 @@ feed moría entre latidos y el dashboard se perdía los updates).
     sea una relectura del capítulo 2. Te dice "cuándo fue la última vez que tocaste esto".
   - `lastSourceUrl` (la URL del evento más reciente — el "seguir leyendo" del dashboard),
     `readCount` (total de eventos) y `sourceDomains` (los sitios, sin duplicar), más los
-    campos propios del manga: `coverUrl`, `status` y `tags`.
+    campos propios del manga: `coverUrl`, `coverVersion`, `hasStoredCover` (true cuando los
+    bytes ya viven en la base — la extensión lo usa para saber qué portadas todavía
+    necesita "sanar" subiendo sus bytes), `status` y `tags`.
 
   Separar `reachedChapter` de `lastActivity` es lo que hace inmune al sistema frente a
   cambios de servidor: el evento "capítulo 1 de nuevo" mueve `lastActivity` pero jamás
@@ -367,20 +374,36 @@ feed moría entre latidos y el dashboard se perdía los updates).
 - `getMangaHistory(id)` — manga + eventos desc, o `null` (la ruta lo traduce a 404).
 - `updateManga(id, input)` — aplica **solo** los campos presentes: `canonicalName`,
   `status`, `tags` (se serializa a JSON al guardar) y `coverUrl` (string = portada manual;
-  `null` = limpiarla). El `normalizedSlug` queda intacto a propósito: es la clave de
-  deduplicación; cambiarlo rompería el matching futuro o chocaría con otro manga. Al
-  terminar publica en el bus para que el dashboard se refresque.
-- `fetchMangaCover(id)` — el truco anti-hotlink. Algunos CDNs de portadas (caso real:
-  `img2mw.xyz`, el CDN de manhwaweb) solo sirven la imagen si el request trae el `Referer`
-  de su propio sitio — y un navegador **jamás** puede mandar el referer de otro sitio, así
-  que el dashboard vería 403 eternos. El servidor local sí puede: descarga la portada
-  mandando `Referer: https://<sourceDomain del evento más reciente>/` y un User-Agent de
-  navegador; si el CDN la rechaza, **reintenta una vez sin referer** (hay CDNs que
-  bloquean referers ajenos pero aceptan ninguno); valida que la respuesta sea `image/*`
-  (nunca reenvía una página de error como si fuera imagen) con timeout de 10 s. La ruta la
-  sirve con `Cache-Control` de un día — seguro porque el dashboard agrega
-  `?v=<hash del coverUrl>` como cache-buster, así cambiar la portada invalida el caché
-  solo. El `fetch` es inyectable para que los tests simulen CDNs sin tocar la red.
+  `null` = limpiarla). Cualquier cambio de `coverUrl` además **anula los bytes guardados**
+  (pertenecían a la portada anterior) e incrementa `coverVersion`, avisándole a los
+  clientes que la identidad de la portada cambió. El `normalizedSlug` queda intacto a
+  propósito: es la clave de deduplicación; cambiarlo rompería el matching futuro o
+  chocaría con otro manga. Al terminar publica en el bus para que el dashboard se
+  refresque.
+- `storeMangaCoverImage(id, bytes, contentType)` — guarda los bytes que subió la extensión
+  (el `PUT /cover-image`) e incrementa `coverVersion`. Existe porque hay CDNs detrás del
+  muro de Cloudflare que rechazan a **cualquier** cliente que no sea un navegador de
+  verdad — a esos ni el proxy del servidor puede entrar, así que la extensión captura la
+  imagen desde dentro del navegador y la manda como bytes.
+- `fetchMangaCover(id)` — sirve la portada, en dos niveles. **Primero los bytes
+  guardados**: si `coverImage` existe se devuelve directo — inmune a bloqueos de CDN y a
+  que el sitio muera (se copia a un `ArrayBuffer` propio porque Prisma devuelve las
+  columnas Bytes como vistas sobre un buffer compartido con otros datos). Si no hay bytes
+  pero sí `coverUrl`, entra el **truco anti-hotlink**: algunos CDNs de portadas (caso
+  real: `img2mw.xyz`, el CDN de manhwaweb) solo sirven la imagen si el request trae el
+  `Referer` de su propio sitio — y un navegador **jamás** puede mandar el referer de otro
+  sitio, así que el dashboard vería 403 eternos. El servidor local sí puede: intenta la
+  descarga con el `Referer` de **cada sitio donde se leyó el manga** (del más reciente al
+  más viejo, hasta 4 — tras una migración de sitio la portada suele pertenecer al CDN del
+  sitio *anterior*, que solo acepta su propio referer) y un User-Agent de navegador; si
+  todos fallan, **reintenta sin referer** (hay CDNs que bloquean referers ajenos pero
+  aceptan ninguno). Valida que la respuesta sea `image/*` (nunca reenvía una página de
+  error como si fuera imagen), con timeout de 10 s por intento. **El primer fetch que
+  funciona persiste los bytes** en la base (e incrementa `coverVersion`): cada portada se
+  descarga de su CDN a lo sumo UNA vez en la vida. La ruta la sirve con `Cache-Control` de
+  un día — seguro porque el dashboard agrega `?v=<hash de coverUrl + coverVersion>` como
+  cache-buster, así cambiar la portada (URL o bytes) invalida el caché solo. El `fetch` es
+  inyectable para que los tests simulen CDNs sin tocar la red.
 - `deleteManga(id)` — borra el manga; sus eventos caen con él por `onDelete: Cascade`. Es
   la única puerta sancionada de salida de datos del log, siempre una decisión explícita
   tuya desde el dashboard. También publica en el bus.
@@ -420,7 +443,7 @@ con una tabla de alias resuelta en la proyección, sin tocar eventos.
 
 ---
 
-## 5. Los tests (65, todos contra una base real)
+## 5. Los tests (74, todos contra una base real)
 
 ### La infraestructura: `bunfig.toml` + `test-setup.ts`
 
@@ -455,7 +478,7 @@ sin puertos.
 | `schemas.test.ts` | 8 | mappers Date→ISO, `chapterNumber` null intacto, tags corruptos → `[]`, status desconocido → `"reading"` |
 | `events.test.ts` | 13 | dedup por slug, **anti-retroceso** (10,11,12 y luego 1 → 4 inserts), **dedup estricto** ("Cap. 49" = "Chapter 49" → 200; labels sin número, por texto exacto), first cover wins, 400s |
 | `events.bus.test.ts` | 2 | publicar notifica a todos los suscriptos; desuscribirse deja de notificar |
-| `library.test.ts` | 19 | **la regla de oro como test**: reached=12 con lastActivity=Cap. 1; orden por actividad; `lastSourceUrl`; filtros; PUT parcial (nombre/status/tags/portada) sin tocar el slug; el proxy de portada (manda el referer del sitio, retry sin referer, rechaza no-imagen); DELETE arrastra toda la historia |
+| `library.test.ts` | 28 | **la regla de oro como test**: reached=12 con lastActivity=Cap. 1; orden por actividad; `lastSourceUrl`; filtros; PUT parcial (nombre/status/tags/portada) sin tocar el slug; portadas: upload de bytes (content-type, tope 5 MB, versión que sube), bytes guardados servidos sin tocar la red, el proxy recorre el referer de cada sitio leído y reintenta sin referer, persiste los bytes al primer éxito, cambiar `coverUrl` los descarta; DELETE arrastra toda la historia |
 | `adapters.test.ts` | 5 | round-trip, replace total en recalibración, case-insensitive, 404/400 |
 | `duplicates.test.ts` | 3 | exactamente el par esperado con sim ≈ 0.93, listas vacías |
 
@@ -574,7 +597,43 @@ cd ../manga-tracker-dashboard && bun run deploy
 (En una Mac nueva además: instalar bun, ajustar su ruta en el plist si difiere, copiar el
 plist, `launchctl bootstrap`, y llevarte el `.db` — ver la portabilidad abajo.)
 
-**Backups y portabilidad:** Time Machine ya cubre `~/Library/Application Support/`, así que
-tu biblioteca se respalda sola. Y migrar a otra Mac es literalmente copiar
-`mangatracker.db` a la misma carpeta de la Mac nueva: la base es un único archivo, sin
-servicios externos, sin cuentas, sin nube. Ese es el punto de todo el diseño local-first.
+**Backups y portabilidad:** hay dos capas, y conviene entender por qué son dos.
+
+La primera es la de siempre: Time Machine ya cubre `~/Library/Application Support/`, así que
+tu biblioteca se respalda sola, y migrar a otra Mac es literalmente copiar `mangatracker.db`
+a la misma carpeta. La base es un único archivo — por eso las portadas se guardan como bytes
+*dentro* de la base y no como archivos sueltos.
+
+La segunda es la réplica opcional en **Azure DocumentDB**, que cubre lo único que Time Machine
+no puede: perder la Mac entera, o el disco, entre snapshots. Se activa poniendo `MONGODB_URL`
+en el `.env`; sin esa variable el módulo queda completamente inerte y la app se comporta igual
+que antes de que existiera.
+
+Lo importante es qué **no** hace: la réplica es *push-only*. SQLite sigue contestando todas las
+lecturas y escrituras, y la nube nunca se mete en el camino de un request. Esto es deliberado.
+La alternativa tentadora — "si hay internet leo de Azure, si no leo de SQLite" — suena mejor y
+es peor: no existe transacción entre un archivo local y un cluster remoto, así que en cuanto
+una escritura remota falla (el free tier se pausa solo a los 60 días, la regla de firewall es
+por IP y tu IP es dinámica) las dos copias divergen, y a partir de ahí tu biblioteca mostraría
+cosas distintas según si hay wifi. Capítulos que desaparecen al conectarte. En un tracker cuya
+única razón de existir es no perder el progreso, ese es el peor modo de falla posible.
+
+El push es una **reconciliación completa por diferencia de claves**, no un feed de cambios: en
+cada corrida se leen solo los ids remotos, se comparan contra SQLite y se escribe la diferencia.
+Cuesta unos cientos de KB a este volumen, y a cambio no hace falta ninguna tabla de watermark,
+ninguna columna `updatedAt`, ninguna migración de Prisma — y un push que falló estando offline
+lo arregla entero el siguiente. Los eventos, al ser append-only con UUID inmutables, se
+reconcilian como una unión de conjuntos.
+
+Los bytes de portada viajan en una pasada aparte cada 6 h, no en cada cambio: medidos contra el
+cluster tardan ~790 ms por MB, y una portada puede pesar 5 MB. Ese tráfico periódico además
+evita que el cluster gratuito se pause por inactividad.
+
+Para volver a levantar todo en una Mac nueva: instalás, ponés las dos variables, arrancás la API
+y hacés `curl -X POST http://127.0.0.1:5150/api/sync/restore`. El restore reconstruye mangas,
+eventos, adapters y portadas conservando los ids originales.
+
+Un detalle de seguridad que costó encontrar y vale la pena saber: los borrados tienen doble
+candado. Una base local vacía **se niega a pushear** y el push de arranque es aditivo — nunca
+borra. Sin eso, arrancar por primera vez en la Mac nueva replicaba una base vacía sobre la nube
+y destruía el respaldo justo antes de poder leerlo.

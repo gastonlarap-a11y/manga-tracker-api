@@ -8,6 +8,8 @@ import { duplicatesRoutes } from "./modules/duplicates/duplicates.routes";
 import { eventsRoutes } from "./modules/events/events.routes";
 import { healthRoutes } from "./modules/health/health.routes";
 import { libraryRoutes } from "./modules/library/library.routes";
+import { syncRoutes } from "./modules/sync/sync.routes";
+import { startSyncScheduler } from "./modules/sync/sync.scheduler";
 
 const app = new OpenAPIHono();
 
@@ -33,6 +35,11 @@ app.route("/api", eventsRoutes);
 app.route("/api", libraryRoutes);
 app.route("/api", adaptersRoutes);
 app.route("/api", duplicatesRoutes);
+app.route("/api", syncRoutes);
+
+// Off-site replica (Azure DocumentDB). Inert unless MONGODB_URL is set, and it
+// never sits in the request path: SQLite remains the source of truth.
+startSyncScheduler();
 
 // Dashboard: static build of manga-tracker-dashboard, copied into ./public by
 // its `bun run deploy`. Only the known SPA routes fall back to index.html, so

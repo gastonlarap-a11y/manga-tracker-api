@@ -7,7 +7,8 @@
     "format": "biome check --write .",
     "typecheck": "tsc --noEmit",
     "db:generate": "bunx --bun prisma generate",
-    "db:migrate": "bunx --bun prisma migrate dev"
+    "db:migrate": "bunx --bun prisma migrate dev",
+    "sync:inspect": "bun run scripts/inspect-replica.ts"
   },
   "dependencies": {
     "@hono/swagger-ui": "^0.6.1",
@@ -15,6 +16,7 @@
     "@prisma/adapter-libsql": "^7.8.0",
     "@prisma/client": "^7.8.0",
     "hono": "^4.12.30",
+    "mongodb": "^6.21.0",
     "zod": "^4.4.3"
   },
   "devDependencies": {
