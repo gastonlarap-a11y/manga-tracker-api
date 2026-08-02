@@ -30,17 +30,21 @@ Production runs `bun run src/index.ts` from this repo via
 > Prod runs **the current checkout**, not `main`. After merging a PR, `git switch main`,
 > `git pull`, then restart — otherwise prod keeps running whatever branch is checked out.
 
-## Off-site replica (Azure DocumentDB)
-The plist carries the replica config, and that is deliberate: it keeps `bun run dev` from
-syncing to the production database. `MONGODB_URL` in `.env` would make dev — whose `dev.db` is
-nearly empty — push deletions that wipe the real library off the cluster.
+## Off-site sync (Azure DocumentDB)
+The plist carries the sync config, and that is deliberate: it keeps `bun run dev` out of the
+production database. If dev needs the replica, point it at its own with `MONGODB_DB` in `.env`.
 
 | Where | `MONGODB_DB` | Effect |
 |---|---|---|
-| plist `EnvironmentVariables` | `mangatracker` | Production replicates |
-| `.env` | `mangatracker_dev` | Dev replicates somewhere harmless |
+| plist `EnvironmentVariables` | `mangatracker` | Production syncs |
+| `.env` (optional) | `mangatracker_dev` | Dev syncs somewhere harmless |
 
 Plist env vars win over `.env`, so the same checkout serves both.
+
+Recovering the credential on a new or reinstalled machine: `bun run sync:bootstrap` (plist →
+Keychain → Azure Key Vault, then writes the plist and re-caches). `bun run sync:bootstrap
+--store` uploads the current one to the vault. Key Vault needs `brew install azure-cli` and
+`az login`.
 
 - The plist holds the cluster password in plaintext → keep it `chmod 600`.
 - **Changing plist env vars needs a full reload**; `kickstart -k` restarts the process with the

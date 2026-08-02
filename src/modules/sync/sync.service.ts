@@ -1,13 +1,21 @@
-// Push-only replication to the off-site replica. SQLite stays the single source
-// of truth: nothing here ever reads from the replica to answer a request, and
-// the only inbound path is an explicit restore.
+// Two-way convergence between this machine's SQLite and the shared store every
+// machine syncs against. SQLite still answers every read and write in the app —
+// nothing here sits in a request path — but it is no longer the only writer, so
+// a sync pulls before it pushes.
 //
-// The push is a full reconciliation by key difference rather than a delta feed.
-// That is a deliberate trade: at this volume (tens of events a day) reading the
-// remote key set costs a few hundred KB, and in exchange the replica needs no
-// watermark table, no `updatedAt` column, and no Prisma migration — and a push
-// that failed while offline is fully repaired by the next one.
+// The model makes this tractable:
+//   - ReadingEvent is append-only with immutable uuids, so merging is a set
+//     union. Nothing is ever removed for being absent on one side; that
+//     inference is what previously let a stale machine wipe a peer's history.
+//   - Manga and SiteAdapter are mutable, so the newer updatedAt wins.
+//   - Deletion is a value (Manga.deletedAt), not an absence, so it converges
+//     under the same last-write-wins rule as any other field.
+//
+// Known limitation: last-write-wins compares wall clocks from different
+// machines. For one person on two NTP-synced Macs who is not editing the same
+// manga in two places at once, that is safe.
 import { prisma } from "../../db/client";
+import { publishLibraryChanged } from "../events/events.bus";
 import {
   fromAdapterDoc,
   fromCoverDoc,
@@ -20,30 +28,14 @@ import {
 } from "./sync.mapper";
 import type { SyncTarget } from "./sync.target";
 
-export interface PushResult {
-  mangas: { upserted: number; deleted: number };
-  events: { inserted: number; deleted: number };
-  adapters: { upserted: number; deleted: number };
-  /** Null when this push skipped the cover pass. */
-  covers: { uploaded: number; deleted: number } | null;
-  /** False when the push was additive-only; every `deleted` is then 0. */
-  deletionsApplied: boolean;
+export interface SyncResult {
+  pulled: { mangas: number; events: number; adapters: number; covers: number };
+  pushed: { mangas: number; events: number; adapters: number; covers: number };
 }
 
-export type PushOutcome =
-  | ({ kind: "pushed" } & PushResult)
-  // An empty local database is never evidence that the replica should be
-  // emptied — it means a fresh machine, or one that just lost its data.
-  | { kind: "skipped"; reason: "local-empty" };
-
-export interface PushOptions {
+export interface SyncOptions {
+  /** Cover bytes are slow, so they ride their own pass. */
   covers: boolean;
-  /**
-   * Whether local absence may remove documents from the replica. False for the
-   * catch-up push at boot, which has no evidence anything was deleted — only a
-   * push triggered by a real local change, or asked for explicitly, does.
-   */
-  allowDeletions: boolean;
 }
 
 const mangaMetaSelect = {
@@ -56,144 +48,309 @@ const mangaMetaSelect = {
   status: true,
   tags: true,
   createdAt: true,
+  updatedAt: true,
+  deletedAt: true,
 } as const;
 
-/**
- * Reconciles the replica against SQLite.
- *
- * Mangas and adapters are re-upserted wholesale: they are mutable and the
- * schema has no `updatedAt`, so there is no honest way to tell which ones
- * changed — and at a few hundred bytes per document, guessing is not worth a
- * migration. Events are immutable and append-only, so only the missing ids move.
- *
- * Deletions are the dangerous direction, so they are gated twice: an empty local
- * database refuses to push at all, and callers must opt in. Without that, the
- * first boot on a fresh machine mirrors nothing over the replica and destroys
- * the very backup it was installed to read.
- */
-export async function pushToReplica(
-  target: SyncTarget,
-  options: PushOptions = { covers: false, allowDeletions: false },
-): Promise<PushOutcome> {
-  const [mangaRows, coveredRows, eventRows, adapterRows] = await Promise.all([
-    prisma.manga.findMany({ select: mangaMetaSelect }),
-    // Ids only: the bytes stay in SQLite until the cover pass asks for them.
-    prisma.manga.findMany({
-      where: { coverImage: { not: null } },
-      select: { id: true, coverVersion: true },
-    }),
-    prisma.readingEvent.findMany(),
-    prisma.siteAdapter.findMany(),
-  ]);
+const empty = (): SyncResult["pulled"] => ({
+  mangas: 0,
+  events: 0,
+  adapters: 0,
+  covers: 0,
+});
 
-  if (mangaRows.length === 0 && adapterRows.length === 0) {
-    return { kind: "skipped", reason: "local-empty" };
+/**
+ * Pull, merge, push — in that order, so what this machine pushes already
+ * reflects everything its peers had said.
+ */
+export async function syncWithReplica(
+  target: SyncTarget,
+  options: SyncOptions = { covers: false },
+): Promise<SyncResult> {
+  const pulled = empty();
+  const pushed = empty();
+
+  // ---- Mangas: last-write-wins in both directions -------------------------
+  const remoteMangaDocs = await target.readMangas();
+  const remoteMangas = remoteMangaDocs.map(fromMangaDoc);
+
+  for (const remote of remoteMangas) {
+    if (remote.normalizedSlug === "") {
+      continue;
+    }
+    const local = await prisma.manga.findUnique({
+      where: { normalizedSlug: remote.normalizedSlug },
+      select: mangaMetaSelect,
+    });
+
+    if (local === null) {
+      await prisma.manga.create({
+        data: {
+          canonicalName: remote.canonicalName,
+          normalizedSlug: remote.normalizedSlug,
+          coverUrl: remote.coverUrl,
+          coverImageType: remote.coverImageType,
+          coverVersion: remote.coverVersion,
+          status: remote.status,
+          tags: remote.tags,
+          createdAt: remote.createdAt,
+          updatedAt: remote.updatedAt,
+          deletedAt: remote.deletedAt,
+        },
+      });
+      pulled.mangas += 1;
+      continue;
+    }
+
+    if (remote.updatedAt.getTime() > local.updatedAt.getTime()) {
+      await prisma.manga.update({
+        where: { normalizedSlug: remote.normalizedSlug },
+        data: {
+          canonicalName: remote.canonicalName,
+          coverUrl: remote.coverUrl,
+          coverImageType: remote.coverImageType,
+          coverVersion: remote.coverVersion,
+          status: remote.status,
+          tags: remote.tags,
+          updatedAt: remote.updatedAt,
+          deletedAt: remote.deletedAt,
+        },
+      });
+      pulled.mangas += 1;
+    }
   }
 
-  const keys = await target.readKeys();
-  const covered = new Map(coveredRows.map((row) => [row.id, row.coverVersion]));
+  // ---- Events: set union, never a deletion --------------------------------
+  const remoteEventIds = await target.readEventIds();
+  const localEvents = await prisma.readingEvent.findMany({
+    select: { id: true, mangaId: true },
+  });
+  const localEventIds = new Set(localEvents.map((row) => row.id));
 
-  const mangaDocs = mangaRows.map((row) =>
-    toMangaDoc({ ...row, hasStoredCover: covered.has(row.id) }),
-  );
-  const localMangaIds = new Set(mangaRows.map((row) => row.id));
-  const staleMangaIds = [...keys.mangaIds].filter(
-    (id) => !localMangaIds.has(id),
-  );
-
-  const localEventIds = new Set(eventRows.map((row) => row.id));
-  const newEventDocs = eventRows
-    .filter((row) => !keys.eventIds.has(row.id))
-    .map(toEventDoc);
-  // SQLite cascades events when a manga is deleted; the replica has no foreign
-  // keys, so the same cascade only happens because this diff catches the orphans.
-  const staleEventIds = [...keys.eventIds].filter(
+  const missingLocally = [...remoteEventIds].filter(
     (id) => !localEventIds.has(id),
   );
-
-  const adapterDocs = adapterRows.map(toAdapterDoc);
-  const localDomains = new Set(adapterRows.map((row) => row.domain));
-  const staleDomains = [...keys.adapterDomains].filter(
-    (domain) => !localDomains.has(domain),
-  );
-
-  // Orphan cover documents are pruned on every push — it is an id diff, no bytes
-  // move — while uploading them is gated behind the cover pass.
-  const staleCoverIds = [...keys.coverVersions.keys()].filter(
-    (id) => !covered.has(id),
-  );
-
-  await target.upsertMangas(mangaDocs);
-  await target.insertEvents(newEventDocs);
-  await target.upsertAdapters(adapterDocs);
-
-  if (options.allowDeletions) {
-    // Events go first so a manga is never left without its history remotely.
-    await target.deleteEvents(staleEventIds);
-    await target.deleteMangas(staleMangaIds);
-    await target.deleteAdapters(staleDomains);
-    await target.deleteCovers(staleCoverIds);
+  if (missingLocally.length > 0) {
+    const docs = await target.readEventDocs(missingLocally);
+    const incoming = docs.map(fromEventDoc);
+    // Mangas were merged first, so every slug an event references already
+    // exists locally — this is the step that translates a peer's manga
+    // identity into this machine's own uuid.
+    const slugToId = new Map(
+      (
+        await prisma.manga.findMany({
+          select: { id: true, normalizedSlug: true },
+        })
+      ).map((row) => [row.normalizedSlug, row.id]),
+    );
+    const rows = incoming
+      .map((event) => {
+        const mangaId = slugToId.get(event.mangaSlug);
+        return mangaId === undefined || event.id === ""
+          ? null
+          : {
+              id: event.id,
+              mangaId,
+              chapterLabel: event.chapterLabel,
+              chapterNumber: event.chapterNumber,
+              sourceUrl: event.sourceUrl,
+              sourceDomain: event.sourceDomain,
+              readAt: event.readAt,
+            };
+      })
+      .filter((row): row is NonNullable<typeof row> => row !== null);
+    if (rows.length > 0) {
+      await prisma.readingEvent.createMany({ data: rows });
+      pulled.events = rows.length;
+    }
   }
 
-  const uploaded = options.covers
-    ? await pushCovers(target, covered, keys.coverVersions)
-    : null;
+  // ---- Adapters: last-write-wins ------------------------------------------
+  const remoteAdapters = (await target.readAdapters()).map(fromAdapterDoc);
+  for (const remote of remoteAdapters) {
+    if (remote.domain === "") {
+      continue;
+    }
+    const local = await prisma.siteAdapter.findUnique({
+      where: { domain: remote.domain },
+    });
+    if (
+      local === null ||
+      remote.updatedAt.getTime() > local.updatedAt.getTime()
+    ) {
+      await prisma.siteAdapter.upsert({
+        where: { domain: remote.domain },
+        create: {
+          domain: remote.domain,
+          titleSelector: remote.titleSelector,
+          chapterSelector: remote.chapterSelector,
+          chapterUrlRegex: remote.chapterUrlRegex,
+          createdAt: remote.createdAt,
+          updatedAt: remote.updatedAt,
+        },
+        update: {
+          titleSelector: remote.titleSelector,
+          chapterSelector: remote.chapterSelector,
+          chapterUrlRegex: remote.chapterUrlRegex,
+          updatedAt: remote.updatedAt,
+        },
+      });
+      pulled.adapters += 1;
+    }
+  }
 
-  const deleted = (ids: string[]): number =>
-    options.allowDeletions ? ids.length : 0;
+  // ---- Push whatever is newer or missing on the other side ----------------
+  const [localMangas, coveredRows, allLocalEvents, localAdapters] =
+    await Promise.all([
+      prisma.manga.findMany({ select: mangaMetaSelect }),
+      // Ids only: the bytes stay in SQLite until the cover pass asks for them.
+      prisma.manga.findMany({
+        where: { coverImage: { not: null } },
+        select: { normalizedSlug: true, coverVersion: true },
+      }),
+      prisma.readingEvent.findMany({
+        include: { manga: { select: { normalizedSlug: true } } },
+      }),
+      prisma.siteAdapter.findMany(),
+    ]);
 
-  return {
-    kind: "pushed",
-    deletionsApplied: options.allowDeletions,
-    mangas: { upserted: mangaDocs.length, deleted: deleted(staleMangaIds) },
-    events: { inserted: newEventDocs.length, deleted: deleted(staleEventIds) },
-    adapters: { upserted: adapterDocs.length, deleted: deleted(staleDomains) },
-    covers:
-      uploaded === null ? null : { uploaded, deleted: deleted(staleCoverIds) },
-  };
+  const covered = new Map(
+    coveredRows.map((row) => [row.normalizedSlug, row.coverVersion]),
+  );
+  const remoteBySlug = new Map(
+    remoteMangas.map((doc) => [doc.normalizedSlug, doc]),
+  );
+  const mangaDocsToPush = localMangas
+    .filter((row) => {
+      const remote = remoteBySlug.get(row.normalizedSlug);
+      return (
+        remote === undefined ||
+        row.updatedAt.getTime() > remote.updatedAt.getTime()
+      );
+    })
+    .map((row) =>
+      toMangaDoc({ ...row, hasStoredCover: covered.has(row.normalizedSlug) }),
+    );
+  await target.upsertMangas(mangaDocsToPush);
+  pushed.mangas = mangaDocsToPush.length;
+
+  const eventDocsToPush = allLocalEvents
+    .filter((row) => !remoteEventIds.has(row.id))
+    .map((row) => toEventDoc(row, row.manga.normalizedSlug));
+  await target.insertEvents(eventDocsToPush);
+  pushed.events = eventDocsToPush.length;
+
+  const remoteAdapterByDomain = new Map(
+    remoteAdapters.map((doc) => [doc.domain, doc]),
+  );
+  const adapterDocsToPush = localAdapters
+    .filter((row) => {
+      const remote = remoteAdapterByDomain.get(row.domain);
+      return (
+        remote === undefined ||
+        row.updatedAt.getTime() > remote.updatedAt.getTime()
+      );
+    })
+    .map(toAdapterDoc);
+  await target.upsertAdapters(adapterDocsToPush);
+  pushed.adapters = adapterDocsToPush.length;
+
+  if (options.covers) {
+    const moved = await syncCovers(target, covered, remoteMangas);
+    pulled.covers = moved.pulled;
+    pushed.covers = moved.pushed;
+  }
+
+  if (pulled.mangas + pulled.events + pulled.adapters + pulled.covers > 0) {
+    // An open dashboard should show what another machine recorded.
+    publishLibraryChanged();
+  }
+
+  return { pulled, pushed };
 }
 
 /**
- * Uploads only the covers whose version moved. Rows are fetched one at a time
- * because each can be 5 MB, and the round trip alone measured ~790 ms per MB
- * against the cluster — which is exactly why this never runs inline with a
- * reading being recorded.
+ * Cover bytes, both directions, driven by coverVersion so nothing moves unless
+ * the image actually changed. Kept out of the metadata path because a cover
+ * measured ~790 ms per MB against the cluster and can weigh 5 MB.
  */
-async function pushCovers(
+async function syncCovers(
   target: SyncTarget,
-  local: Map<string, number>,
-  remote: Map<string, number>,
-): Promise<number> {
-  const outdated = [...local.entries()]
-    .filter(([id, version]) => remote.get(id) !== version)
-    .map(([id]) => id);
+  localVersions: Map<string, number>,
+  remoteMangas: ReturnType<typeof fromMangaDoc>[],
+): Promise<{ pulled: number; pushed: number }> {
+  const remoteVersions = await target.readCoverVersions();
+  let pulled = 0;
+  let pushed = 0;
 
-  let uploaded = 0;
-  for (const id of outdated) {
+  // Pull: a peer has newer bytes than anything stored here.
+  for (const remote of remoteMangas) {
+    const remoteVersion = remoteVersions.get(remote.normalizedSlug);
+    if (remoteVersion === undefined) {
+      continue;
+    }
+    const localVersion = localVersions.get(remote.normalizedSlug);
+    if (localVersion !== undefined && localVersion >= remoteVersion) {
+      continue;
+    }
+    const doc = await target.readCover(remote.normalizedSlug);
+    const cover = doc === null ? null : fromCoverDoc(doc);
+    if (cover === null) {
+      continue;
+    }
+    await prisma.manga.update({
+      where: { normalizedSlug: cover.normalizedSlug },
+      data: {
+        // Copy rather than hand over the driver's buffer: it may be a view onto
+        // a shared pool, the same hazard library.service.ts guards against.
+        coverImage: new Uint8Array(cover.coverImage),
+        coverImageType: cover.coverImageType,
+      },
+    });
+    pulled += 1;
+    localVersions.set(cover.normalizedSlug, cover.coverVersion);
+  }
+
+  // Push: this machine has bytes the shared store lacks or has stale.
+  for (const [slug, version] of localVersions) {
+    if (remoteVersions.get(slug) === version) {
+      continue;
+    }
     const row = await prisma.manga.findUnique({
-      where: { id },
+      where: { normalizedSlug: slug },
       select: {
-        id: true,
+        normalizedSlug: true,
         coverImage: true,
         coverImageType: true,
         coverVersion: true,
       },
     });
     if (row?.coverImage == null) {
-      // Cleared between the id scan and now; the next push prunes the document.
       continue;
     }
     await target.upsertCovers([
       toCoverDoc({
-        id: row.id,
+        normalizedSlug: row.normalizedSlug,
         coverImage: row.coverImage,
         coverImageType: row.coverImageType,
         coverVersion: row.coverVersion,
       }),
     ]);
-    uploaded += 1;
+    pushed += 1;
   }
-  return uploaded;
+
+  // The one sanctioned removal: the merged manga says there are no bytes, so
+  // the stored image is not "missing", it was cleared on purpose.
+  const clearedSlugs = [...remoteVersions.keys()].filter(
+    (slug) => !localVersions.has(slug),
+  );
+  const clearedByValue = clearedSlugs.filter((slug) => {
+    const merged = remoteMangas.find((doc) => doc.normalizedSlug === slug);
+    return merged !== undefined && merged.coverVersion > 0;
+  });
+  await target.deleteCovers(clearedByValue);
+
+  return { pulled, pushed };
 }
 
 export type RestoreOutcome =
@@ -212,11 +369,10 @@ export type RestoreOutcome =
     };
 
 /**
- * Rebuilds SQLite from the replica. This is the half that makes the backup
- * worth anything — an untested backup is not a backup.
- *
- * Refuses to run over a populated database unless forced, because the replica
- * is a mirror of some machine's state, not necessarily a superset of this one's.
+ * Replaces the local database with the shared store. Ordinary machine changes
+ * no longer need this — a plain sync pulls everything — so it exists for the
+ * one case a merge cannot serve: the local SQLite is corrupt or suspect and
+ * should be thrown away.
  */
 export async function restoreFromReplica(
   target: SyncTarget,
@@ -237,58 +393,15 @@ export async function restoreFromReplica(
     };
   }
 
-  const [mangaDocs, eventDocs, adapterDocs] = await Promise.all([
-    target.readMangas(),
-    target.readEvents(),
-    target.readAdapters(),
-  ]);
-
-  const mangas = mangaDocs.map(fromMangaDoc).filter((row) => row.id !== "");
-  const restoredIds = new Set(mangas.map((row) => row.id));
-  // SQLite enforces the foreign key the replica does not: an event whose manga
-  // did not come back would abort the whole restore.
-  const events = eventDocs
-    .map(fromEventDoc)
-    .filter((row) => row.id !== "" && restoredIds.has(row.mangaId));
-  const adapters = adapterDocs
-    .map(fromAdapterDoc)
-    .filter((row) => row.domain !== "");
-
-  // Deleting mangas cascades to their events, so this clears both.
   await prisma.manga.deleteMany();
   await prisma.siteAdapter.deleteMany();
 
-  await prisma.manga.createMany({ data: mangas });
-  await prisma.readingEvent.createMany({ data: events });
-  await prisma.siteAdapter.createMany({ data: adapters });
-
-  let covers = 0;
-  for (const doc of mangaDocs) {
-    if (doc.hasStoredCover !== true) {
-      continue;
-    }
-    const cover = fromCoverDoc((await target.readCover(String(doc._id))) ?? {});
-    if (cover === null || !restoredIds.has(cover.mangaId)) {
-      continue;
-    }
-    await prisma.manga.update({
-      where: { id: cover.mangaId },
-      data: {
-        // Copy rather than hand over the driver's buffer: it may be a view onto
-        // a shared pool, the same hazard library.service.ts guards against when
-        // reading covers back out.
-        coverImage: new Uint8Array(cover.coverImage),
-        coverImageType: cover.coverImageType,
-      },
-    });
-    covers += 1;
-  }
-
+  const result = await syncWithReplica(target, { covers: true });
   return {
     kind: "restored",
-    mangas: mangas.length,
-    events: events.length,
-    adapters: adapters.length,
-    covers,
+    mangas: result.pulled.mangas,
+    events: result.pulled.events,
+    adapters: result.pulled.adapters,
+    covers: result.pulled.covers,
   };
 }

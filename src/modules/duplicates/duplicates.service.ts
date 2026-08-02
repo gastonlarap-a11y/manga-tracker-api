@@ -15,6 +15,9 @@ export interface DuplicatePair {
 
 export async function findDuplicatePairs(): Promise<DuplicatePair[]> {
   const mangas = await prisma.manga.findMany({
+    // A deleted manga is not a duplicate candidate; its row only lingers so
+    // the deletion can reach the other machines.
+    where: { deletedAt: null },
     orderBy: { createdAt: "asc" },
   });
 

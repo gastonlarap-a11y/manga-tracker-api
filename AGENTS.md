@@ -10,8 +10,10 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `src/db/client.ts` — PrismaClient wired to the libSQL adapter
 - `src/modules/<feature>/` — one vertical slice: `*.routes.ts` + `*.service.ts` + `*.test.ts`
   (plus extra colocated units when needed, e.g. `events/events.bus.ts`)
-- `src/modules/sync/` — optional push-only replica to Azure DocumentDB (`sync.target.ts` is the
-  ONLY file allowed to import `mongodb`; `sync.mapper.ts` is pure and driver-free)
+- `src/modules/sync/` — optional two-way sync with Azure DocumentDB (`sync.target.ts` is the ONLY
+  file allowed to import `mongodb`; `sync.mapper.ts` is pure and driver-free)
+- `scripts/` — operator tools run by hand: `sync:inspect` (what the shared store holds) and
+  `sync:bootstrap` (recover the credential from the Keychain or Azure Key Vault)
 - `src/lib/` — pure shared utilities (normalization, chapter parsing, title similarity,
   shared Zod schemas + error hook) with colocated tests
 - `src/generated/prisma/` — generated Prisma client (never edit; gitignored)
@@ -55,11 +57,23 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   notifications.
 - Only `src/config.ts` reads env vars; everything else receives values from it
   (`DATABASE_URL`, `PORT`, and the optional `MONGODB_URL` / `MONGODB_DB`).
-- The Azure DocumentDB replica is **push-only**: SQLite answers every read and write, and the
-  only inbound path is the explicit `POST /api/sync/restore`. Never make a request handler read
-  from the replica — divergence would make the library depend on connectivity. Deletions are
-  gated twice (an empty local DB refuses to push at all; callers must opt in) because the boot
-  push on a fresh machine would otherwise mirror nothing over the backup and destroy it.
+- Azure DocumentDB is a **shared store several machines converge on**, never a read path: SQLite
+  answers every request, and a sync only runs on the scheduler's triggers. Never make a request
+  handler read from it — that would make the library depend on connectivity.
+- Convergence rules, and why they are not negotiable:
+  - `ReadingEvent` is a set union by uuid. **Nothing is ever removed for being absent on one
+    side** — the target has no delete method at all. Inferring deletion from absence is what let
+    a stale machine wipe a peer's history.
+  - `Manga` and `SiteAdapter` merge last-write-wins on `updatedAt`, which every writer sets by
+    hand. Never switch those fields to `@updatedAt`: it overwrites the value on write, so
+    applying a peer's document would restamp it and the two machines would trade it forever.
+  - Deletion is `Manga.deletedAt`, a value that converges like any other field. Queries that
+    show mangas must filter it.
+  - Documents are keyed by natural keys (`normalizedSlug`, `domain`), not by the local uuid, so
+    two machines that discover the same title separately merge instead of colliding on the
+    unique slug index.
+- Known limitation: last-write-wins compares wall clocks across machines. Safe for one person on
+  NTP-synced Macs who is not editing the same manga in two places at once.
 
 ## Engineering standards
 - Every feature ships with its tests. Run `bun run lint` + `bun run typecheck` + `bun test`

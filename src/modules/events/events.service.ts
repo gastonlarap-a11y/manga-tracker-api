@@ -36,6 +36,18 @@ export async function recordReadingEvent(
     update: {},
   });
 
+  // Reading a deleted manga again brings it back — the deletion was a
+  // statement about the library, and picking the series up again reverses it.
+  // Its history is still there because the delete was soft.
+  let resurrected = false;
+  if (manga.deletedAt !== null) {
+    manga = await prisma.manga.update({
+      where: { id: manga.id },
+      data: { deletedAt: null, updatedAt: new Date() },
+    });
+    resurrected = true;
+  }
+
   // First cover wins: an already-stored cover (automatic or user-set) is
   // never overwritten by later readings — clearing it from the dashboard is
   // the way to let a new one in.
@@ -43,7 +55,11 @@ export async function recordReadingEvent(
   if (input.coverUrl && manga.coverUrl === null) {
     manga = await prisma.manga.update({
       where: { id: manga.id },
-      data: { coverUrl: input.coverUrl, coverVersion: { increment: 1 } },
+      data: {
+        coverUrl: input.coverUrl,
+        coverVersion: { increment: 1 },
+        updatedAt: new Date(),
+      },
     });
     coverChanged = true;
   }
@@ -62,7 +78,7 @@ export async function recordReadingEvent(
     orderBy: { readAt: "desc" },
   });
   if (existing) {
-    if (coverChanged) {
+    if (coverChanged || resurrected) {
       publishLibraryChanged();
     }
     return { manga, event: existing, created: false };

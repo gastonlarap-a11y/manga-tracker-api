@@ -21,6 +21,39 @@ beforeEach(async () => {
   await prisma.manga.deleteMany();
 });
 
+describe("POST /events on a deleted manga", () => {
+  it("resurrects it with its history when it is read again", async () => {
+    const first = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Berserk",
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://olympusxyz.com/berserk/1",
+        })
+      ).json(),
+    );
+    await prisma.manga.update({
+      where: { id: first.manga.id },
+      data: { deletedAt: new Date() },
+    });
+
+    const res = await postEvent({
+      mangaName: "Berserk",
+      chapterLabel: "Cap. 2",
+      sourceUrl: "https://olympusxyz.com/berserk/2",
+    });
+
+    expect(res.status).toBe(201);
+    const stored = await prisma.manga.findUniqueOrThrow({
+      where: { id: first.manga.id },
+    });
+    // Picking the series up again reverses the deletion, and the soft delete
+    // means the old chapters are still there.
+    expect(stored.deletedAt).toBe(null);
+    expect(await prisma.readingEvent.count()).toBe(2);
+  });
+});
+
 describe("POST /events", () => {
   it("records an event deriving slug, domain and chapter number", async () => {
     const res = await postEvent({

@@ -1,8 +1,14 @@
-// Pure translation between SQLite rows and the replica's documents. No I/O and
-// no mongodb import lives here, so every edge case is unit-testable: this is
-// where tags stop being a JSON string, Bytes become BinData, and anything the
-// replica hands back that looks corrupt degrades instead of breaking a restore
-// (same defensive posture as src/lib/schemas.ts).
+// Pure translation between SQLite rows and the shared documents every machine
+// converges on. No I/O and no mongodb import lives here, so every edge case is
+// unit-testable: this is where tags stop being a JSON string, Bytes become
+// BinData, and anything a peer wrote that looks corrupt degrades instead of
+// breaking a sync (same defensive posture as src/lib/schemas.ts).
+//
+// Documents are keyed by natural keys, not by the local uuid: two machines that
+// discover the same manga independently produce different uuids but the same
+// normalizedSlug, and the slug is immutable (updateManga never recomputes it).
+// Keying by uuid would make those two rows collide on the unique slug index
+// instead of merging.
 import {
   type MangaStatus,
   statusFromDb,
@@ -10,24 +16,28 @@ import {
 } from "../../lib/schemas";
 
 export interface MangaDoc {
+  /** normalizedSlug — the identity every machine agrees on. */
   _id: string;
+  /** The originating machine's local uuid; informational only. */
+  id: string;
   canonicalName: string;
-  normalizedSlug: string;
   coverUrl: string | null;
   coverImageType: string | null;
   coverVersion: number;
-  // Denormalized so the cover pass knows which mangas owe bytes without
-  // touching the covers collection.
   hasStoredCover: boolean;
   status: MangaStatus;
-  // A real array here; SQLite has no array columns, the replica does.
   tags: string[];
   createdAt: Date;
+  /** Last-write-wins tiebreaker. */
+  updatedAt: Date;
+  /** Soft delete travels as a value; absence would be ambiguous. */
+  deletedAt: Date | null;
 }
 
 export interface ReadingEventDoc {
   _id: string;
-  mangaId: string;
+  /** Denormalized so a peer can resolve the event against its own manga row. */
+  mangaSlug: string;
   chapterLabel: string;
   chapterNumber: number | null;
   sourceUrl: string;
@@ -36,7 +46,6 @@ export interface ReadingEventDoc {
 }
 
 export interface SiteAdapterDoc {
-  // The domain is already unique in SQLite, so it doubles as the natural key.
   _id: string;
   id: string;
   titleSelector: string;
@@ -47,33 +56,31 @@ export interface SiteAdapterDoc {
 }
 
 export interface CoverDoc {
+  /** normalizedSlug, aligned with MangaDoc. */
   _id: string;
   data: Uint8Array;
   contentType: string | null;
-  // Mirrors Manga.coverVersion so a push can diff without moving any bytes.
   coverVersion: number;
 }
 
-/**
- * Deliberately carries a flag instead of the bytes: a metadata push must never
- * pull every cover out of SQLite just to decide whether one exists.
- */
 interface MangaRow {
   id: string;
   canonicalName: string;
   normalizedSlug: string;
   coverUrl: string | null;
+  /** A flag, never the bytes: a metadata sync must not read every cover. */
   hasStoredCover: boolean;
   coverImageType: string | null;
   coverVersion: number;
   status: string;
   tags: string;
   createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
 }
 
 interface ReadingEventRow {
   id: string;
-  mangaId: string;
   chapterLabel: string;
   chapterNumber: number | null;
   sourceUrl: string;
@@ -92,14 +99,14 @@ interface SiteAdapterRow {
 }
 
 // ------------------------------------------------------
-// SQLite -> replica
+// SQLite -> shared documents
 // ------------------------------------------------------
 
 export function toMangaDoc(manga: MangaRow): MangaDoc {
   return {
-    _id: manga.id,
+    _id: manga.normalizedSlug,
+    id: manga.id,
     canonicalName: manga.canonicalName,
-    normalizedSlug: manga.normalizedSlug,
     coverUrl: manga.coverUrl,
     coverImageType: manga.coverImageType,
     coverVersion: manga.coverVersion,
@@ -107,13 +114,18 @@ export function toMangaDoc(manga: MangaRow): MangaDoc {
     status: statusFromDb(manga.status),
     tags: tagsFromJson(manga.tags),
     createdAt: manga.createdAt,
+    updatedAt: manga.updatedAt,
+    deletedAt: manga.deletedAt,
   };
 }
 
-export function toEventDoc(event: ReadingEventRow): ReadingEventDoc {
+export function toEventDoc(
+  event: ReadingEventRow,
+  mangaSlug: string,
+): ReadingEventDoc {
   return {
     _id: event.id,
-    mangaId: event.mangaId,
+    mangaSlug,
     chapterLabel: event.chapterLabel,
     chapterNumber: event.chapterNumber,
     sourceUrl: event.sourceUrl,
@@ -135,13 +147,13 @@ export function toAdapterDoc(adapter: SiteAdapterRow): SiteAdapterDoc {
 }
 
 export function toCoverDoc(manga: {
-  id: string;
+  normalizedSlug: string;
   coverImage: Uint8Array;
   coverImageType: string | null;
   coverVersion: number;
 }): CoverDoc {
   return {
-    _id: manga.id,
+    _id: manga.normalizedSlug,
     data: manga.coverImage,
     contentType: manga.coverImageType,
     coverVersion: manga.coverVersion,
@@ -149,12 +161,12 @@ export function toCoverDoc(manga: {
 }
 
 // ------------------------------------------------------
-// replica -> SQLite (restore)
+// Shared documents -> SQLite
 // ------------------------------------------------------
 
-// Documents come back from a remote store that nothing in this repo validates,
-// so every reverse mapper coerces rather than trusts. A single unreadable field
-// must not abort a restore of thousands of good rows.
+// Documents come from a store that nothing in this repo validates, written by
+// another machine possibly running an older build, so every reverse mapper
+// coerces rather than trusts. One unreadable field must not abort a sync.
 function asString(value: unknown, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
@@ -187,6 +199,16 @@ export function asDate(value: unknown): Date {
   return new Date(0);
 }
 
+export function asNullableDate(value: unknown): Date | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const parsed = asDate(value);
+  // Epoch here means "unparseable", and treating that as a deletion would
+  // silently hide a manga on every machine.
+  return parsed.getTime() === 0 ? null : parsed;
+}
+
 /**
  * The driver returns BinData as a Binary wrapper, but a fake target (or a
  * document written by another client) may hand back a raw Uint8Array. Accept
@@ -207,39 +229,41 @@ export function asBytes(value: unknown): Uint8Array | null {
   return null;
 }
 
-export interface MangaRestoreInput {
-  id: string;
-  canonicalName: string;
+export interface MangaMerge {
   normalizedSlug: string;
+  canonicalName: string;
   coverUrl: string | null;
   coverImageType: string | null;
   coverVersion: number;
   status: string;
   tags: string;
   createdAt: Date;
+  updatedAt: Date;
+  deletedAt: Date | null;
 }
 
-export function fromMangaDoc(doc: Record<string, unknown>): MangaRestoreInput {
+export function fromMangaDoc(doc: Record<string, unknown>): MangaMerge {
   const tags = Array.isArray(doc.tags)
     ? doc.tags.filter((tag): tag is string => typeof tag === "string")
     : [];
   return {
-    id: asString(doc._id),
+    normalizedSlug: asString(doc._id),
     canonicalName: asString(doc.canonicalName),
-    normalizedSlug: asString(doc.normalizedSlug),
     coverUrl: asNullableString(doc.coverUrl),
     coverImageType: asNullableString(doc.coverImageType),
     coverVersion: asInt(doc.coverVersion),
     status: statusFromDb(asString(doc.status, "reading")),
-    // Back to the JSON string the SQLite column expects.
+    // Back to the JSON string the SQLite column stores.
     tags: JSON.stringify(tags),
     createdAt: asDate(doc.createdAt),
+    updatedAt: asDate(doc.updatedAt),
+    deletedAt: asNullableDate(doc.deletedAt),
   };
 }
 
-export interface EventRestoreInput {
+export interface EventMerge {
   id: string;
-  mangaId: string;
+  mangaSlug: string;
   chapterLabel: string;
   chapterNumber: number | null;
   sourceUrl: string;
@@ -247,10 +271,10 @@ export interface EventRestoreInput {
   readAt: Date;
 }
 
-export function fromEventDoc(doc: Record<string, unknown>): EventRestoreInput {
+export function fromEventDoc(doc: Record<string, unknown>): EventMerge {
   return {
     id: asString(doc._id),
-    mangaId: asString(doc.mangaId),
+    mangaSlug: asString(doc.mangaSlug),
     chapterLabel: asString(doc.chapterLabel),
     chapterNumber: asNullableNumber(doc.chapterNumber),
     sourceUrl: asString(doc.sourceUrl),
@@ -259,7 +283,7 @@ export function fromEventDoc(doc: Record<string, unknown>): EventRestoreInput {
   };
 }
 
-export interface AdapterRestoreInput {
+export interface AdapterMerge {
   id: string;
   domain: string;
   titleSelector: string;
@@ -269,12 +293,9 @@ export interface AdapterRestoreInput {
   updatedAt: Date;
 }
 
-export function fromAdapterDoc(
-  doc: Record<string, unknown>,
-): AdapterRestoreInput {
+export function fromAdapterDoc(doc: Record<string, unknown>): AdapterMerge {
   const domain = asString(doc._id);
   return {
-    // Pre-`id` documents fall back to the domain, which is unique anyway.
     id: asString(doc.id, domain),
     domain,
     titleSelector: asString(doc.titleSelector),
@@ -285,23 +306,23 @@ export function fromAdapterDoc(
   };
 }
 
-export interface CoverRestoreInput {
-  mangaId: string;
+export interface CoverMerge {
+  normalizedSlug: string;
   coverImage: Uint8Array;
   coverImageType: string | null;
+  coverVersion: number;
 }
 
 /** Null when the document carries no readable bytes — the cover is skipped. */
-export function fromCoverDoc(
-  doc: Record<string, unknown>,
-): CoverRestoreInput | null {
+export function fromCoverDoc(doc: Record<string, unknown>): CoverMerge | null {
   const bytes = asBytes(doc.data);
   if (bytes === null) {
     return null;
   }
   return {
-    mangaId: asString(doc._id),
+    normalizedSlug: asString(doc._id),
     coverImage: bytes,
     coverImageType: asNullableString(doc.contentType),
+    coverVersion: asInt(doc.coverVersion),
   };
 }

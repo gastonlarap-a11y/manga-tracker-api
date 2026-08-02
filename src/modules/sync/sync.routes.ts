@@ -3,59 +3,36 @@ import { defaultHook, errorSchema } from "../../lib/http";
 import {
   getSyncStatus,
   isSyncEnabled,
-  pushNow,
+  syncNow,
   withTarget,
 } from "./sync.scheduler";
 import { restoreFromReplica } from "./sync.service";
 
-const countsSchema = z.object({ upserted: z.number(), deleted: z.number() });
+const movedSchema = z.object({
+  mangas: z.number(),
+  events: z.number(),
+  adapters: z.number(),
+  covers: z.number(),
+});
 
-const pushResultSchema = z
-  .discriminatedUnion("kind", [
-    z.object({
-      kind: z.literal("pushed"),
-      deletionsApplied: z
-        .boolean()
-        .describe("False when the push was additive-only"),
-      mangas: countsSchema,
-      events: z.object({ inserted: z.number(), deleted: z.number() }),
-      adapters: countsSchema,
-      covers: z
-        .object({ uploaded: z.number(), deleted: z.number() })
-        .nullable()
-        .describe("Null when this push skipped the cover pass"),
-    }),
-    z.object({
-      kind: z.literal("skipped"),
-      reason: z
-        .literal("local-empty")
-        .describe(
-          "The local database is empty, which never justifies emptying the replica",
-        ),
-    }),
-  ])
-  .openapi("SyncPushResult");
+const syncResultSchema = z
+  .object({
+    pulled: movedSchema.describe("Brought in from other machines"),
+    pushed: movedSchema.describe("Sent to the shared store"),
+  })
+  .openapi("SyncResult");
 
 const syncStatusSchema = z
   .object({
     enabled: z.boolean().describe("False when MONGODB_URL is not configured"),
     connected: z.boolean(),
-    lastPushAt: z.iso.datetime().nullable(),
-    lastResult: pushResultSchema.nullable(),
+    lastSyncAt: z.iso.datetime().nullable(),
+    lastResult: syncResultSchema.nullable(),
     lastError: z
       .object({ message: z.string(), at: z.iso.datetime() })
       .nullable(),
   })
   .openapi("SyncStatus");
-
-const restoreResultSchema = z
-  .object({
-    mangas: z.number(),
-    events: z.number(),
-    adapters: z.number(),
-    covers: z.number(),
-  })
-  .openapi("SyncRestoreResult");
 
 const disabled = { error: "Sync is disabled: MONGODB_URL is not set" } as const;
 
@@ -64,21 +41,21 @@ const getStatusRoute = createRoute({
   path: "/sync/status",
   tags: ["sync"],
   description:
-    "Local-only snapshot of the replication state; never touches the network.",
+    "Local-only snapshot of the sync state; never touches the network.",
   responses: {
     200: {
-      description: "Current replication state",
+      description: "Current sync state",
       content: { "application/json": { schema: syncStatusSchema } },
     },
   },
 });
 
-const postPushRoute = createRoute({
+const postSyncRoute = createRoute({
   method: "post",
-  path: "/sync/push",
+  path: "/sync/now",
   tags: ["sync"],
   description:
-    "Forces a reconciliation against the replica. Pass covers=true to also upload cover bytes.",
+    "Pulls what other machines recorded, merges it, and pushes what is new here. Pass covers=true to also move cover bytes.",
   request: {
     query: z.object({
       covers: z
@@ -89,11 +66,11 @@ const postPushRoute = createRoute({
   },
   responses: {
     200: {
-      description: "What the push moved",
-      content: { "application/json": { schema: pushResultSchema } },
+      description: "What the sync moved, in each direction",
+      content: { "application/json": { schema: syncResultSchema } },
     },
     502: {
-      description: "The replica could not be reached or refused the write",
+      description: "The shared store could not be reached",
       content: { "application/json": { schema: errorSchema } },
     },
     503: {
@@ -108,7 +85,7 @@ const postRestoreRoute = createRoute({
   path: "/sync/restore",
   tags: ["sync"],
   description:
-    "Rebuilds SQLite from the replica. Refuses to run over a populated database unless force=true.",
+    "Throws the local database away and rebuilds it from the shared store. Ordinary machine switches do not need this — a plain sync merges both sides. Refuses to run over a populated database unless force=true.",
   request: {
     query: z.object({
       force: z
@@ -120,7 +97,7 @@ const postRestoreRoute = createRoute({
   responses: {
     200: {
       description: "What was restored",
-      content: { "application/json": { schema: restoreResultSchema } },
+      content: { "application/json": { schema: movedSchema } },
     },
     409: {
       description:
@@ -128,7 +105,7 @@ const postRestoreRoute = createRoute({
       content: { "application/json": { schema: errorSchema } },
     },
     502: {
-      description: "The replica could not be reached",
+      description: "The shared store could not be reached",
       content: { "application/json": { schema: errorSchema } },
     },
     503: {
@@ -147,7 +124,7 @@ export const syncRoutes = new OpenAPIHono({ defaultHook })
     return c.json(
       {
         ...status,
-        lastPushAt: status.lastPushAt?.toISOString() ?? null,
+        lastSyncAt: status.lastSyncAt?.toISOString() ?? null,
         lastError:
           status.lastError === null
             ? null
@@ -159,21 +136,16 @@ export const syncRoutes = new OpenAPIHono({ defaultHook })
       200,
     );
   })
-  .openapi(postPushRoute, async (c) => {
+  .openapi(postSyncRoute, async (c) => {
     if (!isSyncEnabled()) {
       return c.json(disabled, 503);
     }
     const { covers } = c.req.valid("query");
     try {
-      // An explicit push is an explicit statement about local state, so it is
-      // the one trigger allowed to prune the replica on demand.
-      return c.json(
-        await pushNow({ covers: covers === "true", allowDeletions: true }),
-        200,
-      );
+      return c.json(await syncNow({ covers: covers === "true" }), 200);
     } catch (error) {
-      // The replica being unreachable is an expected state here, not a bug:
-      // report it as an upstream failure instead of a 500.
+      // The shared store being unreachable is an expected state here, not a
+      // bug: report it as an upstream failure instead of a 500.
       return c.json({ error: failureMessage(error) }, 502);
     }
   })
@@ -189,7 +161,7 @@ export const syncRoutes = new OpenAPIHono({ defaultHook })
       if (outcome.kind === "local-not-empty") {
         return c.json(
           {
-            error: `Local database is not empty (${outcome.mangas} mangas, ${outcome.events} events, ${outcome.adapters} adapters). Retry with force=true to replace it.`,
+            error: `Local database is not empty (${outcome.mangas} mangas, ${outcome.events} events, ${outcome.adapters} adapters). A plain sync merges both sides; retry with force=true only to replace this machine's data.`,
           },
           409,
         );

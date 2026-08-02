@@ -5,9 +5,9 @@ Local-first personal manga reading tracker. A REST API built with Bun + Hono 4 +
 reading progress through content-script heuristics, and by a same-origin static web dashboard.
 Everything runs locally: single instance, no background scraping, and SQLite is the only source
 of truth for reads and writes. Reading progress is stored as append-only events (event sourcing);
-current state is derived by projection. An optional push-only replica mirrors the database to
-Azure DocumentDB for off-site durability — it never sits in the request path, so the tracker
-behaves identically with no network.
+current state is derived by projection. An optional two-way sync with Azure DocumentDB gives
+off-site durability and lets several machines share one library — it never sits in the request
+path, so the tracker behaves identically with no network.
 
 ## Prerequisites
 
@@ -54,7 +54,8 @@ the connection string: it carries the cluster password.
 | `bun run typecheck` | Type-check with `tsc --noEmit` |
 | `bun run db:generate` | Generate the Prisma client into `src/generated/prisma/` |
 | `bun run db:migrate` | Create/apply development migrations (`prisma migrate dev`) |
-| `bun run sync:inspect` | Show what the off-site replica holds (counts, indexes, cover bytes, a sample document) |
+| `bun run sync:inspect` | Show what the shared store holds (counts, indexes, cover bytes, a sample document) |
+| `bun run sync:bootstrap` | Recover the sync credential on a new machine (plist → Keychain → Azure Key Vault) |
 
 ## Project structure
 
@@ -76,32 +77,56 @@ the connection string: it carries the cluster password.
 Interactive Swagger UI at [`/docs`](http://127.0.0.1:5150/docs); the OpenAPI 3.1 spec is
 generated from the Zod route schemas and served at `/openapi.json`.
 
-## Off-site replica (Azure DocumentDB)
+## Off-site sync (Azure DocumentDB)
 
-Optional and push-only: SQLite stays the source of truth for every read and write, and the
-replica exists so the library survives losing the machine. It never answers a request, so
-latency and offline behaviour are unchanged.
+Optional. SQLite still answers every read and write — the cluster never sits in a request path —
+but it is no longer the only writer: several machines converge on one shared store, so switching
+laptops needs no action at all.
 
 | Endpoint | What it does |
 |---|---|
-| `GET /api/sync/status` | Replication state (local-only, never touches the network) |
-| `POST /api/sync/push?covers=true` | Forces a reconciliation; `covers=true` also uploads cover bytes |
-| `POST /api/sync/restore?force=true` | Rebuilds SQLite from the replica; refuses over a populated database unless forced |
+| `GET /api/sync/status` | Sync state (local-only, never touches the network) |
+| `POST /api/sync/now?covers=true` | Pulls, merges and pushes right now; `covers=true` also moves cover bytes |
+| `POST /api/sync/restore?force=true` | Throws the local database away and rebuilds it. Not needed to switch machines — a plain sync merges both sides |
 
-To look at the replica itself rather than the replication state, run `bun run sync:inspect`.
+To look at the shared store itself rather than the sync state, run `bun run sync:inspect`.
 
-A push is a full reconciliation by key difference, not a delta feed: it needs no watermark table
-and no `updatedAt` column, and a push that failed while offline is repaired by the next one.
-Metadata is pushed 5 s after any library change; cover bytes ride a separate pass every 6 h,
-because they are slow (~790 ms per MB against the cluster) and would otherwise sit in the hot
-path of recording a chapter. That periodic traffic also keeps a free-tier cluster from being
-paused for inactivity at 60 days.
+### How it converges
 
-**Restoring on a new Mac:** install, set both env vars, start the API, then
-`curl -X POST http://127.0.0.1:5150/api/sync/restore`. Do this *before* recording anything —
-the boot push is deliberately additive-only and an empty database refuses to push at all, so the
-replica cannot be destroyed by starting fresh, but a restore is what actually brings the library
-back.
+- **Reading events** are append-only with immutable uuids, so merging is a set union. **Nothing
+  is ever removed for being absent on one side.** That inference is what previously let a stale
+  machine wipe another one's history.
+- **Mangas and adapters** are mutable, so the newer `updatedAt` wins.
+- **Deleting** a manga sets `deletedAt` instead of dropping the row, so the deletion travels as a
+  fact and converges under the same rule. Reading the series again brings it back with its
+  history.
+- Documents are keyed by `normalizedSlug`, not by the local uuid, so two machines that discover
+  the same title separately merge instead of colliding.
+
+Syncs run 5 s after any library change, at boot, and every 6 h. Cover bytes ride the 6 h pass
+because they are slow (~790 ms per MB against the cluster) and would otherwise sit in the path of
+recording a chapter. That periodic traffic also keeps a free-tier cluster from being paused for
+inactivity at 60 days.
+
+### Using a second machine
+
+Install, run `bun run sync:bootstrap` to recover the credential, start the API. The first sync
+pulls the whole library. From then on, just open the app on whichever machine you are using —
+what you read on the other one is already there.
+
+Last-write-wins compares wall clocks, so this assumes one person on NTP-synced machines who is
+not editing the same manga in two places at once.
+
+### Credential recovery
+
+The connection string lives in the LaunchAgent plist (`chmod 600`), cached in the macOS Keychain,
+and optionally stored in Azure Key Vault. `bun run sync:bootstrap` resolves it in that order and
+installs it, so a formatted machine only needs `az login`. `bun run sync:bootstrap --store`
+uploads the current credential to the vault; Key Vault has no per-secret fee and charges ~$0.03
+per 10,000 operations, which at this usage rounds to nothing.
+
+Key Vault is the root of trust precisely because your Azure account unlocks it — storing a
+service-principal secret on disk to fetch a database secret from disk would solve nothing.
 
 > The free tier has **no backup/restore and no HA** of its own, and pauses after 60 days of
 > inactivity. It is off-site durability, not a second copy of a copy: keep Time Machine on the

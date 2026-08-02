@@ -636,7 +636,7 @@ describe("GET /mangas/{id}/cover", () => {
 });
 
 describe("DELETE /mangas/{id}", () => {
-  it("deletes the manga and its whole history", async () => {
+  it("makes the manga disappear from the library", async () => {
     const manga = await seedManga("junk", "Junk Manga", [
       {
         label: "Cap. 1",
@@ -651,8 +651,41 @@ describe("DELETE /mangas/{id}", () => {
     });
 
     expect(res.status).toBe(204);
-    expect(await prisma.manga.count()).toBe(0);
-    expect(await prisma.readingEvent.count()).toBe(0);
+    expect(await (await libraryRoutes.request("/library")).json()).toEqual([]);
+    expect(await libraryRoutes.request(`/mangas/${manga.id}/history`)).toEqual(
+      expect.objectContaining({ status: 404 }),
+    );
+  });
+
+  it("keeps the row and its events so the deletion can reach other machines", async () => {
+    const manga = await seedManga("junk", "Junk Manga", [
+      {
+        label: "Cap. 1",
+        number: 1,
+        domain: "olympusxyz.com",
+        readAt: "2026-07-01T10:00:00.000Z",
+      },
+    ]);
+
+    await libraryRoutes.request(`/mangas/${manga.id}`, { method: "DELETE" });
+
+    // Soft: absence cannot carry "deleted" across machines, a timestamp can.
+    const stored = await prisma.manga.findUniqueOrThrow({
+      where: { id: manga.id },
+    });
+    expect(stored.deletedAt).not.toBe(null);
+    expect(await prisma.readingEvent.count()).toBe(1);
+  });
+
+  it("responds 404 when deleting an already-deleted manga", async () => {
+    const manga = await seedManga("junk", "Junk Manga", []);
+    await libraryRoutes.request(`/mangas/${manga.id}`, { method: "DELETE" });
+
+    const res = await libraryRoutes.request(`/mangas/${manga.id}`, {
+      method: "DELETE",
+    });
+
+    expect(res.status).toBe(404);
   });
 
   it("responds 404 for an unknown id", async () => {
