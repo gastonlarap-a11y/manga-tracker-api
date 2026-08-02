@@ -10,6 +10,8 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `src/db/client.ts` — PrismaClient wired to the libSQL adapter
 - `src/modules/<feature>/` — one vertical slice: `*.routes.ts` + `*.service.ts` + `*.test.ts`
   (plus extra colocated units when needed, e.g. `events/events.bus.ts`)
+- `src/modules/sync/` — optional push-only replica to Azure DocumentDB (`sync.target.ts` is the
+  ONLY file allowed to import `mongodb`; `sync.mapper.ts` is pure and driver-free)
 - `src/lib/` — pure shared utilities (normalization, chapter parsing, title similarity,
   shared Zod schemas + error hook) with colocated tests
 - `src/generated/prisma/` — generated Prisma client (never edit; gitignored)
@@ -34,6 +36,11 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - Handlers in `*.routes.ts` only validate and map responses; business logic lives in the
   module's `*.service.ts`.
 - Never edit `src/generated/**`; never commit `.env*` or `*.db` files.
+- `mongodb` is pinned to `^6`: the 7.x line ships `bson@7`, which calls `node:v8`
+  `isBuildingSnapshot` at import time and crashes under Bun. Do not bump it without re-running
+  the connectivity check.
+- Sync must never break a local write: failures are logged and surfaced through
+  `GET /api/sync/status`, never propagated into a request handler.
 
 ## Architecture
 - Reading progress is stored as append-only events; current state is derived by projection —
@@ -46,7 +53,13 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   Modules never import each other's services/routes; the one sanctioned cross-module edge is
   the in-process event bus (`events/events.bus.ts`), imported to publish SSE change
   notifications.
-- Only `src/config.ts` reads env vars; everything else receives values from it.
+- Only `src/config.ts` reads env vars; everything else receives values from it
+  (`DATABASE_URL`, `PORT`, and the optional `MONGODB_URL` / `MONGODB_DB`).
+- The Azure DocumentDB replica is **push-only**: SQLite answers every read and write, and the
+  only inbound path is the explicit `POST /api/sync/restore`. Never make a request handler read
+  from the replica — divergence would make the library depend on connectivity. Deletions are
+  gated twice (an empty local DB refuses to push at all; callers must opt in) because the boot
+  push on a fresh machine would otherwise mirror nothing over the backup and destroy it.
 
 ## Engineering standards
 - Every feature ships with its tests. Run `bun run lint` + `bun run typecheck` + `bun test`

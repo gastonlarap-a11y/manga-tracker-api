@@ -406,9 +406,23 @@ Vistas:
 - `/manga/:id` — historial completo.
 - `/duplicates` — sugerencias de merge.
 
-### Fase 11 — Export/import (opcional)
+### Fase 11 — Export/import (opcional) — ✅ cubierta por la réplica en Azure
 
-`GET /api/export` → JSON completo. `POST /api/import` para restaurar. Time Machine ya cubre el `.db`, esto es capa extra de portabilidad.
+Resuelta de otra forma: en vez de `GET /api/export` + `POST /api/import` sobre un JSON, el
+módulo `src/modules/sync/` replica la base a **Azure DocumentDB** (free tier, 32 GB) y la
+reconstruye con `POST /api/sync/restore`. Da lo mismo que buscaba el export (portabilidad) y
+además durabilidad fuera de la máquina, sin un formato de archivo propio que mantener.
+
+Decisiones que quedaron fijadas al implementarla:
+- **Push-only.** SQLite es la única fuente de verdad para leer y escribir; la nube nunca está en
+  el camino de un request. Se descartó el dual-read ("si hay internet leo de Azure") porque sin
+  transacción entre archivo local y cluster remoto las copias divergen y la biblioteca pasaría a
+  depender de la conectividad.
+- **No se migró a Mongo.** Prisma 7 no soporta MongoDB (la doc oficial manda 6.19), y migrar
+  habría implicado degradar Prisma o reescribir los 4 services y el arnés de tests, sin ningún
+  problema de escala que lo justifique.
+- **`mongodb` fijado en `^6`**: el 7.x trae `bson@7`, que revienta bajo Bun.
+- **Borrados con doble candado**: base local vacía no pushea, y el push de arranque es aditivo.
 
 ## Consideraciones de largo plazo
 
