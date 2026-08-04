@@ -14,6 +14,14 @@ const dbPath = join(
 );
 Bun.env.DATABASE_URL = `file:${dbPath}`;
 
+// The suite must never reach the cluster, and it has to be hermetic by
+// construction rather than because a developer's .env happens to be incomplete.
+// Once `env:pull` started writing a working MONGODB_URL, the sync tests began
+// hitting Azure for real — a POST /sync/now from a test run is a write into the
+// shared store, and events there can never be removed.
+delete Bun.env.MONGODB_URL;
+delete Bun.env.MONGODB_DB;
+
 // Apply the committed migrations synchronously (bun:sqlite, no Prisma CLI
 // spawn) so tests run against the exact schema production gets.
 const migrationsDir = join(import.meta.dir, "prisma", "migrations");

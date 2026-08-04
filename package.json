@@ -9,7 +9,12 @@
     "db:generate": "bunx --bun prisma generate",
     "db:migrate": "bunx --bun prisma migrate dev",
     "sync:inspect": "bun run scripts/inspect-replica.ts",
-    "sync:bootstrap": "bun run scripts/bootstrap-credentials.ts"
+    "sync:bootstrap": "bun run scripts/bootstrap-credentials.ts",
+    "deploy": "bun run deploy/deploy.ts",
+    "deploy:provision": "bun run deploy/provision.ts",
+    "env:push": "bun run deploy/env-push.ts",
+    "env:pull": "bun run deploy/env-pull.ts",
+    "env:show": "bun run deploy/env-show.ts"
   },
   "dependencies": {
     "@hono/swagger-ui": "^0.6.1",
