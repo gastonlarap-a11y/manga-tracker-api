@@ -13,7 +13,12 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `src/modules/sync/` — optional two-way sync with Azure DocumentDB (`sync.target.ts` is the ONLY
   file allowed to import `mongodb`; `sync.mapper.ts` is pure and driver-free)
 - `scripts/` — operator tools run by hand: `sync:inspect` (what the shared store holds) and
-  `sync:bootstrap` (recover the credential from the Keychain or Azure Key Vault)
+  `sync:bootstrap` (thin alias of `env:pull --prod`)
+- `deploy/` — deployment and configuration tooling, outside `src/` because it never ships with
+  the app: `provision.ts` (Key Vault), `env-push.ts` / `env-pull.ts` (secrets), `deploy.ts` (the
+  one-command publish), `lib/` (a `Runner`-injected wrapper per external tool: `az`, `plutil`,
+  `security`, `launchctl`), and `azure.json` — committed, non-secret, names the resource group
+  and vault
 - `src/lib/` — pure shared utilities (normalization, chapter parsing, title similarity,
   shared Zod schemas + error hook) with colocated tests
 - `src/generated/prisma/` — generated Prisma client (never edit; gitignored)
@@ -28,6 +33,9 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - Dev: `bun run dev` · Test: `bun test` · Single test: `bun test <file>`
 - Lint: `bun run lint` · Format: `bun run format` · Typecheck: `bun run typecheck`
 - Prisma client: `bun run db:generate` · Migrations: `bun run db:migrate`
+- Deploy: `bun run deploy` (add `--dry-run` to see the steps without touching production)
+- Azure: `bun run deploy:provision` (create the vault) · `bun run env:push` / `bun run env:pull`
+- Inspect config: `bun run env:show` (every profile + drift on disk; read-only, no network)
 
 > `typescript@7` is the native compiler (tsgo) — no `tsserver.js`; VS Code IntelliSense uses the
 > "TypeScript (Native Preview)" ext via `js/ts.*` settings (see `.vscode/`), not `typescript.tsdk`.
@@ -43,6 +51,21 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   the connectivity check.
 - Sync must never break a local write: failures are logged and surfaced through
   `GET /api/sync/status`, never propagated into a request handler.
+- A new environment variable is declared in `deploy/lib/env.ts` (`ENV_MANIFEST`) as `secret`,
+  `profile` or `machine`, and read in `src/config.ts`. Nothing else needs to change: push, pull
+  and deploy all derive their behaviour from that classification. There is deliberately no
+  per-environment file tree: Bun only auto-loads `.env`, `.env.<NODE_ENV>` and `.env.local` from
+  the cwd, and `.gitignore` covers `.env*` but would not cover a nested `env/` directory.
+- Reloading launchd is bootout → **wait until the job is gone** → bootstrap. `bootout` returns
+  before the teardown finishes, and bootstrapping into a domain that still holds the dying job
+  fails with `Bootstrap failed: 5: Input/output error` and leaves production down.
+- `deploy/` talks to the outside world only through the `Runner` in `deploy/lib/run.ts`, so
+  command construction stays testable without an Azure subscription. Secrets go to `az` through
+  a 0600 temp file, never `--value`, which `ps` would expose.
+- `test-setup.ts` deletes `MONGODB_URL` before anything imports `config.ts`. The suite must be
+  hermetic by construction, not because a developer's `.env` happens to lack the credential —
+  a `POST /sync/now` from a test run is a real write into the shared store, and events there
+  can never be removed.
 
 ## Architecture
 - Reading progress is stored as append-only events; current state is derived by projection —

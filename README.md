@@ -37,11 +37,24 @@ bun run db:migrate
 
 Production and development share this checkout, so they are kept apart by database name: the
 LaunchAgent plist sets `MONGODB_DB=mangatracker` and `.env` sets `MONGODB_DB=mangatracker_dev`
-(plist variables win over `.env`). Without that split, a change in dev — whose `dev.db` is nearly
-empty — would push deletions that wipe the real library off the cluster.
+(plist variables win over `.env`).
+
+The split matters because everything dev does would otherwise converge into the real library, and
+two of those effects have no undo:
+
+- **Events are a set union that never removes anything** — the target has no delete method for
+  them at all. Any event a test produces stays in your history, on every machine, forever.
+- **`deletedAt` converges like any other field**, so exercising a delete in dev deletes the manga
+  in production too.
+- Mangas merge last-write-wins on `updatedAt`, so a dev edit overwrites the real one.
 
 `.env` is gitignored (and so is `.env.*`, which is why there is no `.env.example`). Never commit
 the connection string: it carries the cluster password.
+
+You do not write these by hand. `bun run env:pull` composes them from
+[`deploy/lib/env.ts`](deploy/lib/env.ts), which declares what each variable is: `MONGODB_URL` is a
+shared secret that lives in Key Vault, `DATABASE_URL` is a path only valid on this machine, and the
+other two are derived from the profile. Adding a variable means adding an entry there.
 
 ## Commands
 
@@ -55,7 +68,22 @@ the connection string: it carries the cluster password.
 | `bun run db:generate` | Generate the Prisma client into `src/generated/prisma/` |
 | `bun run db:migrate` | Create/apply development migrations (`prisma migrate dev`) |
 | `bun run sync:inspect` | Show what the shared store holds (counts, indexes, cover bytes, a sample document) |
-| `bun run sync:bootstrap` | Recover the sync credential on a new machine (plist → Keychain → Azure Key Vault) |
+| `bun run sync:bootstrap` | Recover the sync credential on a new machine (alias of `env:pull --prod`) |
+
+### Deployment and configuration
+
+| Command | What it does |
+|---|---|
+| `bun run deploy` | Publish this checkout: checks → prod migrations → LaunchAgent reload → health probe |
+| `bun run deploy --dry-run` | Report every step without changing anything |
+| `bun run deploy:provision` | Create the Azure Key Vault and grant yourself access (idempotent) |
+| `bun run env:push` | Upload the shared secrets to Key Vault |
+| `bun run env:pull` | Write `.env` for development, resolving secrets from Key Vault |
+| `bun run env:pull --prod` | Same, into the LaunchAgent plist |
+| `bun run env:show` | Print every profile and whether the files on disk match. Read-only, no network |
+
+Useful flags: `deploy --with-env` refreshes the plist first, `deploy --skip-checks` skips
+lint/typecheck/tests, and every command takes `--vault <name>` to target a different vault.
 
 ## Project structure
 
@@ -67,6 +95,10 @@ the connection string: it carries the cluster password.
 - `src/lib/` — pure shared utilities (slug normalization, chapter parsing, title
   similarity, shared Zod schemas) with tests
 - `prisma/` — schema and migrations
+- `scripts/` — operator tools run by hand (`sync:inspect`, `sync:bootstrap`)
+- `deploy/` — deployment and configuration tooling: `provision.ts` (Key Vault), `env-push.ts` /
+  `env-pull.ts` (secrets), `deploy.ts` (the one-command publish), and `azure.json`, the committed
+  non-secret pointer to the resource group and vault
 - `public/` — static build of the web dashboard (gitignored; deployed from the sibling
   `manga-tracker-dashboard` repo), served by the API on `/`, `/manga/:id` and `/duplicates`
 - `PLAN.md`, `docs/` — implementation roadmap and module specs
@@ -110,9 +142,15 @@ inactivity at 60 days.
 
 ### Using a second machine
 
-Install, run `bun run sync:bootstrap` to recover the credential, start the API. The first sync
-pulls the whole library. From then on, just open the app on whichever machine you are using —
-what you read on the other one is already there.
+Clone, `az login`, `bun install`, then:
+
+```bash
+bun run env:pull --prod   # recovers the credential and writes the plist
+bun run deploy            # migrations, LaunchAgent, health check
+```
+
+The first sync pulls the whole library. From then on, just open the app on whichever machine you
+are using — what you read on the other one is already there.
 
 Last-write-wins compares wall clocks, so this assumes one person on NTP-synced machines who is
 not editing the same manga in two places at once.
@@ -120,13 +158,21 @@ not editing the same manga in two places at once.
 ### Credential recovery
 
 The connection string lives in the LaunchAgent plist (`chmod 600`), cached in the macOS Keychain,
-and optionally stored in Azure Key Vault. `bun run sync:bootstrap` resolves it in that order and
-installs it, so a formatted machine only needs `az login`. `bun run sync:bootstrap --store`
-uploads the current credential to the vault; Key Vault has no per-secret fee and charges ~$0.03
-per 10,000 operations, which at this usage rounds to nothing.
+and stored in Azure Key Vault as `mangatracker-mongodb-url` inside the vault named in
+[`deploy/azure.json`](deploy/azure.json). `bun run env:pull` resolves it in that order —
+cheapest first, network last — so a formatted machine only needs `az login`. `bun run env:push`
+sends it the other way. Key Vault has no per-secret fee and charges ~$0.03 per 10,000 operations,
+which at this usage rounds to nothing.
 
 Key Vault is the root of trust precisely because your Azure account unlocks it — storing a
-service-principal secret on disk to fetch a database secret from disk would solve nothing.
+service-principal secret on disk to fetch a database secret from disk would solve nothing. That
+is also why `deploy/azure.json` is committed: it holds no secret, and a machine that just cloned
+the repo has to know which vault to ask before it can get anything else.
+
+`bun run deploy:provision` creates the vault. It is idempotent, and it handles the two things
+that make a first run fail: registering the `Microsoft.KeyVault` provider on a subscription that
+has never used one, and granting yourself **Key Vault Secrets Officer** — because creating a
+vault gives you no access to its secrets, so without it the next write returns 403.
 
 > The free tier has **no backup/restore and no HA** of its own, and pauses after 60 days of
 > inactivity. It is off-site durability, not a second copy of a copy: keep Time Machine on the
@@ -137,5 +183,24 @@ service-principal secret on disk to fetch a database secret from disk would solv
 Runs permanently on the local Mac as a launchd LaunchAgent
 (`~/Library/LaunchAgents/com.mangatracker.plist`) executing `bun run src/index.ts` from this
 repo — no build step. The production database lives in
-`~/Library/Application Support/MangaTracker/`. Full procedure in `PLAN.md` (Fase 3); the
-repeatable steps are captured in `.claude/skills/deploy/`.
+`~/Library/Application Support/MangaTracker/`.
+
+```bash
+bun run deploy
+```
+
+That runs lint, typecheck and the test suite, applies pending migrations to the production
+database, reloads the LaunchAgent and waits for `/health` to answer. It stops before restarting
+anything if a check or a migration fails, so a bad change never reaches a running service.
+
+Two details it exists to get right:
+
+- **Production runs this working copy, not `main`.** launchd points at the repo directory, so
+  whatever is checked out is what serves. The deploy warns when the branch is not `main` or the
+  tree is dirty, but it does not stop you.
+- **The reload is a full `bootout` + `bootstrap`.** `launchctl kickstart -k` restarts the process
+  against the configuration launchd already has in memory, so a changed credential would be
+  silently ignored and you would debug a deploy that "worked" against the old value.
+
+First-time install on a new machine is in `PLAN.md` (Fase 3); the manual fallback for every step
+is in `.claude/skills/deploy/`.

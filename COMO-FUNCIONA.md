@@ -555,13 +555,180 @@ launchctl bootout gui/$(id -u)/com.mangatracker     # apaga producción
 bun run dev                                          # dev con hot-reload (.env → dev.db)
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mangatracker.plist  # vuelve producción
 
-# Publicar un cambio de código (no hay compilación: corre del repo)
-launchctl kickstart -k gui/$(id -u)/com.mangatracker   # reinicia el servicio
-
-# Si el cambio incluyó una migración, aplicarla a producción ANTES del kickstart:
-DATABASE_URL="file:$HOME/Library/Application Support/MangaTracker/mangatracker.db" \
-  bunx --bun prisma migrate deploy
+# Publicar un cambio: un solo comando (ver la sección 8.1)
+bun run deploy
 ```
+
+### 8.1. `bun run deploy` — publicar con un comando
+
+Antes esto eran cuatro pasos a mano y era fácil saltarse uno. Ahora
+`deploy/deploy.ts` los encadena y aborta apenas algo falla:
+
+1. **Estado de git.** Avisa si estás fuera de `main` o si hay cambios sin commitear.
+   No te frena: es información, porque a veces querés probar una rama en producción.
+   Avisa porque producción **corre el checkout actual**, no `main` — launchd apunta al
+   directorio del repo, así que lo que esté ahí es lo que sirve.
+2. **Pre-vuelo:** `lint`, `typecheck` y los tests. Si alguno falla, corta acá y
+   **producción ni se entera** — sigue corriendo la versión anterior.
+3. **Migraciones** contra la base de producción. Si fallan, tampoco reinicia nada.
+4. **Recarga del LaunchAgent**: `bootout` + `bootstrap` completo.
+5. **Sonda de salud**: pide `/health` hasta 15 veces, una por segundo, porque launchd
+   tarda un instante en levantar el proceso y una sola consulta inmediata daría un
+   falso negativo.
+6. **Estado del sync**, informativo: te dice si la réplica quedó habilitada.
+
+| Flag | Para qué |
+|---|---|
+| `--dry-run` | Muestra cada paso sin tocar nada |
+| `--with-env` | Antes de todo, refresca el plist desde Key Vault |
+| `--skip-checks` | Saltea lint, typecheck y tests |
+
+**Por qué la recarga es completa y no `kickstart -k`.** `kickstart` reinicia el proceso
+contra la configuración que launchd ya tiene en memoria: si cambiaste una variable en
+`EnvironmentVariables`, la **ignora en silencio**. Terminás depurando un deploy que
+"funcionó" pero sigue usando la credencial vieja. `bootout` + `bootstrap` releen el
+plist desde cero.
+
+**Y por qué entre los dos hay una espera.** Esto costó una caída de producción, así que
+vale la pena entenderlo. `launchctl bootout` **es asíncrono**: vuelve apenas launchd
+acepta la orden, no cuando el job terminó de bajar. Si hacés `bootstrap` de inmediato,
+entrás a un dominio que todavía sostiene el job agonizando y launchd responde:
+
+```
+Bootstrap failed: 5: Input/output error
+```
+
+…y te quedás sin servicio. Es una condición de carrera, y por eso es traicionera: solo
+aparece cuando el servicio **estaba corriendo**, o sea en todo deploy real, mientras que
+un `--dry-run` o un deploy sobre un servicio ya caído pasan sin problema.
+
+La secuencia correcta, que es la que implementa `deploy/lib/macos.ts`:
+
+1. `bootout`
+2. **esperar** consultando `launchctl print` hasta que el servicio desaparezca del dominio
+   (con techo de ~5 s, no un `sleep` fijo)
+3. `bootstrap`, con hasta 3 intentos — el desmontaje puede seguir asentándose incluso
+   después de que `print` deje de encontrarlo
+
+A mano sería:
+
+```bash
+launchctl bootout gui/$(id -u)/com.mangatracker
+while launchctl print gui/$(id -u)/com.mangatracker >/dev/null 2>&1; do sleep 0.25; done
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mangatracker.plist
+```
+
+**Si el `bootstrap` falla**, el script no se calla: el servicio queda caído y te imprime
+el comando exacto para levantarlo a mano. Un deploy roto que no avisa es peor que uno
+que falla ruidosamente.
+
+### 8.2. Las variables de entorno y Azure Key Vault
+
+El problema concreto: la connection string de Azure DocumentDB lleva la contraseña del
+cluster. No puede ir al repo. Pero si vivís solo en el plist de una Mac, formatear esa
+Mac te deja sin nada.
+
+La solución tiene tres niveles, y `bun run env:pull` los recorre **del más barato al más
+caro**:
+
+1. **El plist** (`~/Library/LaunchAgents/com.mangatracker.plist`) — ya configurado, gratis.
+2. **El Keychain de macOS** (servicio `manga-tracker-mongodb`) — local, offline,
+   sobrevive a reinstalar la app.
+3. **Azure Key Vault** (`kv-mangatracker`, secreto `mangatracker-mongodb-url`) —
+   sobrevive a formatear el disco.
+
+Lo que encuentra en el nivel 3 lo cachea en el 2, así la próxima vez funciona sin red.
+
+**Por qué Key Vault y no un archivo en Azure Storage.** Para leer un blob necesitás la
+access key de la storage account: otro secreto que tenés que tener guardado *antes* de
+poder leer tus secretos. El huevo y la gallina. Con Key Vault la raíz de confianza es tu
+cuenta de Azure: `az login` y listo, no hay nada que guardar en disco.
+
+**Qué sube y qué no.** `deploy/lib/env.ts` clasifica cada variable, y solo una viaja:
+
+| Variable | Tipo | Por qué |
+|---|---|---|
+| `MONGODB_URL` | `secret` | Es el único secreto compartido → va al vault |
+| `DATABASE_URL` | `machine` | Es una ruta absoluta: subirla sería subir basura, en otra Mac no aplica |
+| `MONGODB_DB` | `profile` | Se deriva: `mangatracker` en prod, `mangatracker_dev` en dev |
+| `PORT` | `profile` | Constante |
+
+Agregar una variable mañana es **una entrada más en esa lista**, no editar cuatro scripts.
+
+**Los comandos:**
+
+```bash
+bun run deploy:provision   # crea el Key Vault y te da permisos (idempotente)
+bun run env:push           # sube MONGODB_URL al vault (lee .env)
+bun run env:push --prod    # idem, pero leyendo el plist
+bun run env:pull           # escribe .env para desarrollo
+bun run env:pull --prod    # escribe el plist de producción
+```
+
+`bun run sync:bootstrap` sigue existiendo: ahora es un alias de `env:pull --prod`.
+
+**Para ver todo junto: `bun run env:show`.** No escribe nada y no toca la red — resuelve
+los secretos mirando solo el plist y el Llavero. Te muestra cada variable en los dos
+perfiles y, abajo, si tus archivos están al día:
+
+```
+MONGODB_URL  [secret]
+  vault     kv-mangatracker / mangatracker-mongodb-url
+  plist     sha 42e6bb81
+  keychain  sha 42e6bb81
+
+MONGODB_DB  [profile]
+  dev       mangatracker_dev
+  prod      mangatracker
+
+On disk
+! .env   absent
+• plist  4/4 match the prod profile
+```
+
+Los secretos salen como **hash corto**, nunca el valor: alcanza para comparar dos máquinas
+o detectar que el plist y el Llavero se desincronizaron, y es seguro pegarlo en un chat.
+
+### 8.3. Por qué NO hay un directorio `env/` con un archivo por entorno
+
+Es lo primero que uno piensa (`env/env.local`, `env/env.prod`, `env/env.desa`), y hay dos
+razones concretas por las que acá sería peor:
+
+- **Bun no los cargaría.** Bun lee automáticamente `.env`, `.env.production` /
+  `.env.development` / `.env.test` (según `NODE_ENV`) y `.env.local`, y **solo desde el
+  directorio actual**. Un `env/env.local` exigiría pasar `--env-file` en `bun run dev`, en
+  el plist y en los tests: tres lugares para desincronizarse.
+- **El `.gitignore` no los cubre.** Hoy ignora `.env` y `.env.*`. Un `env/env.local` **no**
+  matchea ninguno de los dos patrones: el primer `git add .` publicaría la contraseña del
+  cluster en GitHub.
+
+Y el argumento de fondo: acá hay **un solo secreto**. Tres archivos serían tres copias de
+la misma contraseña en disco, que se desincronizan entre sí. El manifiesto ya es la lista
+única de "todos los entornos y sus valores", y `env:show` la hace visible sin duplicar nada.
+
+**Dos trampas de Azure que el provision resuelve solo**, y que si no las conocés te
+cuestan una tarde:
+
+- Una suscripción que **nunca** usó Key Vault tiene el proveedor `Microsoft.KeyVault`
+  sin registrar, y toda creación falla con `MissingSubscriptionRegistration`. El script
+  detecta el estado y registra (es una sola vez por suscripción).
+- **Crear un vault no te da acceso a sus secretos.** Desde la versión de API `2026-02-01`
+  el modelo por defecto es RBAC, y el plano de control (crear el vault) está separado del
+  plano de datos (leer y escribir secretos). Sin asignarte el rol **Key Vault Secrets
+  Officer**, el primer `secret set` responde 403. El script se lo asigna y después
+  **espera** a que propague, porque una asignación de rol tarda minutos en hacerse
+  efectiva.
+
+**Una trampa de Bun con los `.env`**, verificada a mano contra el runtime: Bun **expande
+`$`** en el valor, y lo hace con comillas dobles, con comillas simples y sin comillas.
+Una contraseña con `$` se convertiría en otra cosa **sin ningún error**. Además un `#` sin
+comillas corta el valor ahí mismo. Por eso `env:pull` escribe todo entre comillas dobles
+con el `$` escapado como `\$`. Y como Bun *no* desescapa `\"` ni `\\` (los deja con la
+barra pegada), un valor con comillas o barras **no es representable**: el script se niega
+a escribirlo en vez de corromper la credencial en silencio.
+
+El archivo se reescribe leyendo el anterior, no generándolo de cero: los comentarios, el
+orden y **cualquier variable tuya que el manifiesto no conozca** sobreviven al pull.
 
 ## 9. Dónde viven tus datos (y qué pasa si borrás el repo)
 
@@ -587,12 +754,17 @@ cd ~/Documents/Git
 git clone https://github.com/gastonlarap-a11y/manga-tracker-api.git
 cd manga-tracker-api
 bun install
-echo 'DATABASE_URL="file:./dev.db"' > .env   # solo para desarrollo
-bun run db:generate                           # regenera el cliente de Prisma (gitignoreado)
-launchctl kickstart -k gui/$(id -u)/com.mangatracker   # y producción vuelve, con TU base intacta
+bun run db:generate         # regenera el cliente de Prisma (gitignoreado)
+az login                    # la raíz de confianza para recuperar la credencial
+bun run env:pull            # escribe .env para desarrollo (baja el secreto del vault)
+bun run deploy              # migraciones + LaunchAgent, con TU base intacta
 # el dashboard (public/ también es gitignoreado):
 cd ../manga-tracker-dashboard && bun run deploy
 ```
+
+En una Mac **nueva** (donde el plist todavía no existe) el orden es el mismo, pero primero
+hay que crear el LaunchAgent: el XML completo está en `PLAN.md` (Fase 3). Con el plist ya
+puesto, `bun run env:pull --prod` le inyecta la credencial y `bun run deploy` levanta todo.
 
 (En una Mac nueva además: instalar bun, ajustar su ruta en el plist si difiere, copiar el
 plist, `launchctl bootstrap`, y llevarte el `.db` — ver la portabilidad abajo.)
@@ -643,10 +815,11 @@ Los bytes de portada viajan en una pasada aparte cada 6 h, no en cada cambio: me
 cluster tardan ~790 ms por MB, y una portada puede pesar 5 MB. Ese tráfico periódico además
 evita que el cluster gratuito se pause por inactividad.
 
-**Cambiar de computador no requiere hacer nada.** Instalás, corrés `bun run sync:bootstrap` para
-recuperar la credencial (la busca en el plist, después en el Llavero de macOS y por último en
-Azure Key Vault), arrancás la API y la primera sincronización trae la biblioteca entera. De ahí
-en adelante abrís la app en la máquina que estés usando y lo que leíste en la otra ya está. El
+**Cambiar de computador no requiere hacer nada.** Instalás, `az login`, `bun run env:pull --prod`
+para recuperar la credencial (la busca en el plist, después en el Llavero de macOS y por último en
+Azure Key Vault — ver la sección 8.2), `bun run deploy`, y la primera sincronización trae la
+biblioteca entera. De ahí en adelante abrís la app en la máquina que estés usando y lo que leíste
+en la otra ya está. El
 endpoint `POST /api/sync/restore` sigue existiendo pero para otra cosa: tirar la base local a la
 basura y reconstruirla, por ejemplo si se corrompió.
 

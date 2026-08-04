@@ -14,46 +14,73 @@ Production runs `bun run src/index.ts` from this repo via
 `~/Library/Application Support/MangaTracker/mangatracker.db`, port 5150, logs in
 `~/Library/Logs/MangaTracker/`.
 
-## First-time install (already done on this Mac; kept for reinstalls/migrations)
-1. `mkdir -p ~/Library/Application\ Support/MangaTracker ~/Library/Logs/MangaTracker`
-2. `DATABASE_URL="file:$HOME/Library/Application Support/MangaTracker/mangatracker.db" bunx --bun prisma migrate deploy`
-3. Create the plist (full XML in `PLAN.md` Fase 3) and load it:
-   `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mangatracker.plist`
-
 ## Publish a change
-1. Pre-flight: `bun run lint` + `bun run typecheck` + `bun test` — all green before touching prod.
-2. If there are new migrations:
-   `DATABASE_URL="file:$HOME/Library/Application Support/MangaTracker/mangatracker.db" bunx --bun prisma migrate deploy`
-3. Restart: `launchctl kickstart -k gui/$(id -u)/com.mangatracker`
-4. Post-check: `curl -s http://127.0.0.1:5150/health` → `{"status":"ok"}`.
+
+```bash
+bun run deploy
+```
+
+Runs lint + typecheck + tests, applies pending migrations to the production database, does a
+full LaunchAgent reload and waits for `/health`. It aborts before restarting anything if a check
+or a migration fails, so the running service is never left in a half-deployed state.
+
+| Flag | Effect |
+|---|---|
+| `--dry-run` | Print every step, change nothing |
+| `--with-env` | Refresh the plist from Key Vault first (`env:pull --prod`) |
+| `--skip-checks` | Skip lint, typecheck and tests |
 
 > Prod runs **the current checkout**, not `main`. After merging a PR, `git switch main`,
-> `git pull`, then restart — otherwise prod keeps running whatever branch is checked out.
+> `git pull`, then deploy — otherwise prod keeps running whatever branch is checked out. The
+> script warns about this but does not block you.
 
-## Off-site sync (Azure DocumentDB)
+## Configuration and credentials
+
+| Command | What it does |
+|---|---|
+| `bun run deploy:provision` | Create the Key Vault + grant yourself access. Idempotent |
+| `bun run env:push` | Upload `MONGODB_URL` to the vault |
+| `bun run env:pull` | Write `.env` (dev) |
+| `bun run env:pull --prod` | Write the plist (prod). `sync:bootstrap` is an alias of this |
+| `bun run env:show` | Every profile + whether `.env` and the plist match. Read-only, no network |
+
+Every command takes `--vault <name>`; `MANGATRACKER_VAULT` does the same. The default lives in
+`deploy/azure.json` (`kv-mangatracker`, resource group `rg-proyectos-personales`, `brazilsouth`).
+
 The plist carries the sync config, and that is deliberate: it keeps `bun run dev` out of the
-production database. If dev needs the replica, point it at its own with `MONGODB_DB` in `.env`.
+production database. Plist env vars win over `.env`, so the same checkout serves both.
 
 | Where | `MONGODB_DB` | Effect |
 |---|---|---|
 | plist `EnvironmentVariables` | `mangatracker` | Production syncs |
-| `.env` (optional) | `mangatracker_dev` | Dev syncs somewhere harmless |
+| `.env` | `mangatracker_dev` | Dev syncs somewhere harmless |
 
-Plist env vars win over `.env`, so the same checkout serves both.
-
-Recovering the credential on a new or reinstalled machine: `bun run sync:bootstrap` (plist →
-Keychain → Azure Key Vault, then writes the plist and re-caches). `bun run sync:bootstrap
---store` uploads the current one to the vault. Key Vault needs `brew install azure-cli` and
-`az login`.
-
-- The plist holds the cluster password in plaintext → keep it `chmod 600`.
-- **Changing plist env vars needs a full reload**; `kickstart -k` restarts the process with the
-  config already loaded and will silently ignore them:
-  `launchctl bootout gui/$(id -u)/com.mangatracker && launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mangatracker.plist`
-- Check it took: `curl -s http://127.0.0.1:5150/api/sync/status`
+- The plist holds the cluster password in plaintext → the tooling keeps it `chmod 600`.
 - Inspect what the cluster actually holds: `bun run sync:inspect` (add a database name to look
   at another, e.g. `bun run sync:inspect mangatracker_dev`).
+- Check the sync took: `curl -s http://127.0.0.1:5150/api/sync/status`
+
+## Manual fallback
+
+Only if `bun run deploy` itself is broken.
+
+1. `bun run lint` + `bun run typecheck` + `bun test`
+2. `DATABASE_URL="file:$HOME/Library/Application Support/MangaTracker/mangatracker.db" bunx --bun prisma migrate deploy`
+3. Full reload — **not** `kickstart -k`, which restarts the process against the configuration
+   launchd already has in memory and silently ignores changed env vars:
+   ```bash
+   launchctl bootout gui/$(id -u)/com.mangatracker
+   # Wait for it to actually be gone before loading again, or bootstrap races the
+   # teardown and dies with `Bootstrap failed: 5: Input/output error`, service down:
+   while launchctl print gui/$(id -u)/com.mangatracker >/dev/null 2>&1; do sleep 0.25; done
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.mangatracker.plist
+   ```
+   `bun run deploy` does exactly this, with a bounded wait and up to 3 bootstrap attempts.
+4. `curl -s http://127.0.0.1:5150/health` → `{"status":"ok"}`
+
+First-time install on a new machine: full XML and steps in `PLAN.md` (Fase 3).
 
 ## Dev vs prod port collision
+
 `launchctl bootout gui/$(id -u)/com.mangatracker` frees port 5150 for `bun run dev`;
-re-bootstrap the plist when done.
+re-bootstrap the plist when done (or just `bun run deploy`).
