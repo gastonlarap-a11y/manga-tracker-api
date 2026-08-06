@@ -7,6 +7,7 @@ import {
   SECRETS_OFFICER_ROLE_ID,
 } from "./az";
 import { secretSpecs } from "./env";
+import { macosAdapter } from "./platform";
 import { createFakeRunner } from "./run";
 import { pushSecret, resolveSecret } from "./secrets";
 
@@ -131,9 +132,12 @@ describe("resolveSecret", () => {
       { when: ["plutil", "-extract"], stdout: "from-plist" },
       { when: ["security", "add-generic-password"] },
     ]);
-    const resolved = await resolveSecret(fake.run, SPEC, { vault: VAULT });
+    const resolved = await resolveSecret(fake.run, SPEC, {
+      vault: VAULT,
+      platform: macosAdapter,
+    });
 
-    expect(resolved).toEqual({ value: "from-plist", from: "plist" });
+    expect(resolved).toEqual({ value: "from-plist", from: "config" });
     expect(fake.calls.some((call) => call[0] === "az")).toBe(false);
   });
 
@@ -142,9 +146,12 @@ describe("resolveSecret", () => {
       { when: ["plutil", "-extract"], code: 1 },
       { when: ["security", "find-generic-password"], stdout: "from-keychain" },
     ]);
-    const resolved = await resolveSecret(fake.run, SPEC, { vault: VAULT });
+    const resolved = await resolveSecret(fake.run, SPEC, {
+      vault: VAULT,
+      platform: macosAdapter,
+    });
 
-    expect(resolved).toEqual({ value: "from-keychain", from: "keychain" });
+    expect(resolved).toEqual({ value: "from-keychain", from: "cache" });
     expect(fake.calls.some((call) => call[0] === "az")).toBe(false);
   });
 
@@ -153,7 +160,10 @@ describe("resolveSecret", () => {
       ...emptyMachine,
       { when: ["az", "keyvault", "secret", "show"], stdout: '"from-vault"' },
     ]);
-    const resolved = await resolveSecret(fake.run, SPEC, { vault: VAULT });
+    const resolved = await resolveSecret(fake.run, SPEC, {
+      vault: VAULT,
+      platform: macosAdapter,
+    });
 
     expect(resolved).toEqual({ value: "from-vault", from: "keyvault" });
     // Caching is what makes the next run work offline.
@@ -170,7 +180,12 @@ describe("resolveSecret", () => {
       { when: ["security", "find-generic-password"], code: 1 },
       { when: ["which", "az"], code: 1 },
     ]);
-    expect(await resolveSecret(fake.run, SPEC, { vault: VAULT })).toBeNull();
+    expect(
+      await resolveSecret(fake.run, SPEC, {
+        vault: VAULT,
+        platform: macosAdapter,
+      }),
+    ).toBeNull();
   });
 });
 

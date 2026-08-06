@@ -275,6 +275,102 @@ launchctl kickstart -k gui/$(id -u)/com.mangatracker    # reinicia el servicio
 
 Docs: https://www.launchd.info/ · https://bun.sh/docs/runtime/http/server
 
+#### Fase 3, en Windows (Task Scheduler)
+
+> **Por qué no un Windows Service:** `sc.exe` exige que el binario implemente el protocolo de
+> control del SCM (`StartServiceCtrlDispatcher`); `bun.exe` no lo hace, y `sc create` apuntando a
+> él falla al arrancar con el Error 1053. Es exactamente el problema que resuelven NSSM/WinSW
+> embarcando un shim — pero este repo evita dependencias nuevas cuando puede. **Task Scheduler**
+> no exige ese protocolo (supervisa un PID como cualquier lanzador de procesos) y es, en la
+> práctica, el análogo más cercano a un LaunchAgent: mismo `RunAtLoad` (trigger "at log on" del
+> usuario) y mismo `KeepAlive` (`RestartOnFailure`).
+>
+> `deploy/lib/windows.ts` asume que esta tarea ya existe (`reloadService` hace `schtasks /End` +
+> `/Run`), igual que `deploy.ts` en Mac asume que el LaunchAgent ya está instalado — la primera
+> instalación es manual en ambos casos, no hay un `bun run deploy:install-service`.
+
+1. Preparar la carpeta de datos y la base de producción (equivalente a
+   `~/Library/Application Support/MangaTracker`):
+   ```powershell
+   New-Item -ItemType Directory -Force -Path "$env:LOCALAPPDATA\MangaTracker\logs" | Out-Null
+   $env:DATABASE_URL = "file:$($env:LOCALAPPDATA -replace '\\','/')/MangaTracker/mangatracker.db"
+   bunx --bun prisma migrate deploy
+   ```
+
+2. Crear `MangaTracker-task.xml` (ajustar `UserId`, la ruta absoluta de `bun.exe` — `Get-Command
+   bun` — y `WorkingDirectory` al checkout real). **`ExecutionTimeLimit` tiene que ser `PT0S`**:
+   el default de Task Scheduler es matar la tarea a las 72 horas, que es exactamente el tipo de
+   corte silencioso que un backend que corre indefinidamente no puede tener. El redirect de
+   stdout/stderr va envuelto en `cmd.exe /c "..."` porque `Actions/Exec` no interpreta `>>` por sí
+   solo:
+   ```xml
+   <?xml version="1.0" encoding="UTF-16"?>
+   <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+     <RegistrationInfo>
+       <Description>Manga Tracker backend (Bun + Hono), started at logon and kept alive.</Description>
+     </RegistrationInfo>
+     <Triggers>
+       <LogonTrigger>
+         <Enabled>true</Enabled>
+         <UserId>DESKTOP-XXXX\gaston</UserId>
+       </LogonTrigger>
+     </Triggers>
+     <Principals>
+       <Principal id="Author">
+         <UserId>DESKTOP-XXXX\gaston</UserId>
+         <!-- S4U: sobrevive bloqueo de pantalla / logoff sin guardar la contraseña del usuario. -->
+         <LogonType>S4U</LogonType>
+         <RunLevel>LeastPrivilege</RunLevel>
+       </Principal>
+     </Principals>
+     <Settings>
+       <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+       <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+       <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+       <StartWhenAvailable>true</StartWhenAvailable>
+       <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+       <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+       <RestartOnFailure>
+         <Interval>PT1M</Interval>
+         <Count>999</Count>
+       </RestartOnFailure>
+     </Settings>
+     <Actions Context="Author">
+       <Exec>
+         <Command>cmd.exe</Command>
+         <Arguments>/c ""C:\Users\gaston\.bun\bin\bun.exe" --env-file="%LOCALAPPDATA%\MangaTracker\prod.env" run src\index.ts >> "%LOCALAPPDATA%\MangaTracker\logs\out.log" 2>> "%LOCALAPPDATA%\MangaTracker\logs\err.log""</Arguments>
+         <WorkingDirectory>C:\Users\gaston\Documents\Git\manga-tracker-api</WorkingDirectory>
+       </Exec>
+     </Actions>
+   </Task>
+   ```
+
+3. Registrar la tarea (sobrescribe si ya existe):
+   ```powershell
+   schtasks /Create /XML MangaTracker-task.xml /TN MangaTracker /F
+   ```
+
+4. `bun run env:pull --prod` escribe `%LOCALAPPDATA%\MangaTracker\prod.env` (el equivalente del
+   plist) con `MONGODB_URL` resuelto desde Key Vault. Recién ahí `bun run deploy` (o
+   `schtasks /Run /TN MangaTracker` a mano) arranca el backend con esa configuración.
+
+**Verificación:**
+- `curl http://127.0.0.1:5150/health` responde.
+- `Stop-Process` sobre el PID del proceso `bun.exe` → Task Scheduler lo reinicia solo (según
+  `RestartOnFailure`, hasta 999 veces cada 1 minuto).
+- Reiniciar Windows e iniciar sesión con el mismo usuario → sin abrir nada, `curl` responde.
+
+**Workflow de desarrollo posterior**, igual que en Mac — sacar la tarea temporalmente para no
+colisionar con el puerto:
+```powershell
+schtasks /End /TN MangaTracker
+bun run dev
+# ... trabajar ...
+schtasks /Run /TN MangaTracker
+```
+
+Docs: https://learn.microsoft.com/windows/win32/taskschd/ · https://bun.sh/docs/runtime/http/server
+
 ### Fase 4 — Extensión esqueleto (MV3)
 
 > **Estado (jul 2026): hecha (código); pendiente la verificación manual en navegadores.**

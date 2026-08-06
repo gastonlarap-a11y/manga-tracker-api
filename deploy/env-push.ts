@@ -12,7 +12,7 @@
 import { canListSecrets, currentAccount, isAzInstalled } from "./lib/az";
 import { flagValue, loadDeployConfig } from "./lib/config";
 import { envValues, parseEnvFile, secretSpecs } from "./lib/env";
-import { readKeychain, readPlistEnv, writeKeychain } from "./lib/macos";
+import { platform } from "./lib/platform";
 import { spawnRunner } from "./lib/run";
 import { pushSecret } from "./lib/secrets";
 import { done, fail, heading, installErrorHandler, step, warn } from "./lib/ui";
@@ -28,10 +28,11 @@ const { vaultName } = await loadDeployConfig(flagValue(args, "--vault"));
 heading(`Pushing secrets to Key Vault "${vaultName}" (source: ${profile})`);
 
 if (!(await isAzInstalled(run))) {
-  fail(
-    "the Azure CLI is not installed",
-    "  brew install azure-cli\n  az login",
-  );
+  const installHint =
+    process.platform === "win32"
+      ? "winget install -e --id Microsoft.AzureCLI"
+      : "brew install azure-cli";
+  fail("the Azure CLI is not installed", `  ${installHint}\n  az login`);
 }
 if ((await currentAccount(run)) === null) {
   fail("not logged in to Azure", "  az login");
@@ -47,7 +48,7 @@ if (!(await canListSecrets(run, vaultName))) {
 /** Where a secret's current value lives on this machine. */
 async function localValue(name: string): Promise<string | null> {
   if (profile === "prod") {
-    return await readPlistEnv(run, name);
+    return await platform.readConfigEnv(run, name);
   }
   const envFile = Bun.file(".env");
   if (await envFile.exists()) {
@@ -64,16 +65,19 @@ let missing = 0;
 
 for (const spec of secretSpecs()) {
   const fromProfile = await localValue(spec.name);
-  const value = fromProfile ?? (await readKeychain(run));
+  const value = fromProfile ?? (await platform.readSecret(run));
   if (value === null || value === "") {
     warn(
-      `${spec.name}: nothing to push — not in ${profile} nor in the Keychain.`,
+      `${spec.name}: nothing to push — not in ${profile} nor in the ` +
+        `${platform.secretCacheLabel}.`,
     );
     missing++;
     continue;
   }
   if (fromProfile === null) {
-    step(`${spec.name}: not in ${profile}, using the Keychain copy.`);
+    step(
+      `${spec.name}: not in ${profile}, using the ${platform.secretCacheLabel} copy.`,
+    );
   }
 
   // Values are never printed: this output goes into terminal scrollback.
@@ -82,14 +86,14 @@ for (const spec of secretSpecs()) {
   if (outcome !== "unchanged") {
     pushed++;
   }
-  await writeKeychain(run, value);
+  await platform.writeSecret(run, value);
 }
 
 if (missing > 0 && pushed === 0) {
   fail(
     "nothing was uploaded",
     profile === "prod"
-      ? "Set the value in the plist first, or run `bun run env:push` to read .env."
+      ? `Set the value in the ${platform.configLabel} first, or run \`bun run env:push\` to read .env.`
       : "Put MONGODB_URL in .env first (Azure portal → your cluster → Connection strings).",
   );
 }

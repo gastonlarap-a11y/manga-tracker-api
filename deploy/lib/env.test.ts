@@ -32,10 +32,12 @@ describe("manifest", () => {
     const secrets = new Map<string, string>();
     const home = "/Users/someone";
 
-    expect(resolveSpec(specFor("DATABASE_URL"), "dev", home, secrets)).toBe(
-      "file:./dev.db",
-    );
-    expect(resolveSpec(specFor("DATABASE_URL"), "prod", home, secrets)).toBe(
+    expect(
+      resolveSpec(specFor("DATABASE_URL"), "dev", home, secrets, "darwin"),
+    ).toBe("file:./dev.db");
+    expect(
+      resolveSpec(specFor("DATABASE_URL"), "prod", home, secrets, "darwin"),
+    ).toBe(
       `file:${home}/Library/Application Support/MangaTracker/mangatracker.db`,
     );
     expect(resolveSpec(specFor("MONGODB_DB"), "dev", home, secrets)).toBe(
@@ -44,6 +46,31 @@ describe("manifest", () => {
     expect(resolveSpec(specFor("MONGODB_DB"), "prod", home, secrets)).toBe(
       "mangatracker",
     );
+  });
+
+  it("defaults the platform to this process, so existing call sites still resolve macOS", () => {
+    const secrets = new Map<string, string>();
+    const home = "/Users/someone";
+
+    // This suite only runs on macOS/Linux CI, so the default lands on the
+    // non-Windows branch either way — asserting against `darwin`'s value
+    // documents that the parameter is optional, not that it always resolves
+    // to darwin specifically.
+    expect(resolveSpec(specFor("DATABASE_URL"), "dev", home, secrets)).toBe(
+      "file:./dev.db",
+    );
+  });
+
+  it("resolves DATABASE_URL under %LOCALAPPDATA% on Windows, with forward slashes", () => {
+    const secrets = new Map<string, string>();
+    const home = "C:\\Users\\someone";
+
+    expect(
+      resolveSpec(specFor("DATABASE_URL"), "prod", home, secrets, "win32"),
+    ).toBe("file:C:/Users/someone/AppData/Local/MangaTracker/mangatracker.db");
+    expect(
+      resolveSpec(specFor("DATABASE_URL"), "dev", home, secrets, "win32"),
+    ).toBe("file:./dev.db");
   });
 
   it("reports a secret as unresolved rather than inventing a value", () => {

@@ -21,7 +21,7 @@ import {
   serializeEnvFile,
   upsertEntry,
 } from "./lib/env";
-import { PLIST_PATH, plistExists, writePlistEnv } from "./lib/macos";
+import { platform } from "./lib/platform";
 import { spawnRunner } from "./lib/run";
 import { resolveSecret } from "./lib/secrets";
 import { done, fail, heading, installErrorHandler, step, warn } from "./lib/ui";
@@ -37,9 +37,9 @@ const { vaultName } = await loadDeployConfig(flagValue(args, "--vault"));
 
 heading(`Pulling the ${profile} configuration`);
 
-if (profile === "prod" && !(await plistExists())) {
+if (profile === "prod" && !(await platform.configExists())) {
   fail(
-    `no LaunchAgent at ${PLIST_PATH}`,
+    `no ${platform.serviceKind} at ${platform.configPath}`,
     "Production is not installed on this machine yet. See .claude/skills/deploy/.",
   );
 }
@@ -53,6 +53,7 @@ for (const spec of ENV_MANIFEST) {
   }
   const resolved = await resolveSecret(run, spec, {
     vault: vaultName,
+    platform,
     onStep: step,
   });
   if (resolved === null) {
@@ -72,15 +73,15 @@ if (profile === "prod") {
     if (value === null) {
       continue;
     }
-    if (!(await writePlistEnv(run, spec.name, value))) {
-      fail(`could not write ${spec.name} into ${PLIST_PATH}`);
+    if (!(await platform.writeConfigEnv(run, spec.name, value))) {
+      fail(`could not write ${spec.name} into ${platform.configPath}`);
     }
-    step(`${spec.name} → plist`);
+    step(`${spec.name} → ${platform.configLabel}`);
   }
-  done(`Wrote ${PLIST_PATH} (chmod 600).`);
+  done(`Wrote ${platform.configPath} (chmod 600).`);
   console.log(
-    "\nlaunchd caches EnvironmentVariables, so this needs a full reload — " +
-      "`kickstart -k` would silently keep the old values:\n" +
+    `\nWriting ${platform.configPath} alone does not restart the ` +
+      `${platform.serviceKind} — apply it with:\n` +
       "  bun run deploy",
   );
   // The two profiles write to different files, and the missing one is the
