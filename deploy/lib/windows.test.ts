@@ -2,8 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Runner } from "./run";
 import { createFakeRunner, type FakeResponse } from "./run";
 import {
+  installTask,
   readConfigEnv,
   readSecret,
   reloadService,
@@ -147,5 +149,48 @@ describe("readConfigEnv / writeConfigEnv", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("installTask", () => {
+  it("writes a task with no execution time limit and registers it with /F", async () => {
+    let xml = "";
+    let call: readonly string[] = [];
+    const run: Runner = async (command) => {
+      call = command;
+      const xmlIndex = command.indexOf("/XML");
+      if (xmlIndex >= 0) {
+        xml = await Bun.file(command[xmlIndex + 1] ?? "").text();
+      }
+      return { ok: true, code: 0, stdout: "", stderr: "" };
+    };
+
+    await installTask(run, {
+      bunPath: "C:\\Users\\gaston\\.bun\\bin\\bun.exe",
+      workingDirectory: "C:\\Users\\gaston\\Documents\\Git\\manga-tracker-api",
+    });
+
+    expect(call[0]).toBe("schtasks");
+    expect(call).toContain("/Create");
+    expect(call).toContain("/F");
+    // The default 72h limit would silently kill an indefinitely-running backend.
+    expect(xml).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
+    expect(xml).toContain("C:\\Users\\gaston\\.bun\\bin\\bun.exe");
+    expect(xml).toContain(
+      "<WorkingDirectory>C:\\Users\\gaston\\Documents\\Git\\manga-tracker-api</WorkingDirectory>",
+    );
+  });
+
+  it("throws with the value still readable when schtasks rejects the definition", async () => {
+    const run: Runner = async () => ({
+      ok: false,
+      code: 1,
+      stdout: "",
+      stderr: "ERROR: Access is denied.",
+    });
+
+    await expect(
+      installTask(run, { bunPath: "bun.exe", workingDirectory: "C:\\repo" }),
+    ).rejects.toThrow(/Access is denied/);
   });
 });

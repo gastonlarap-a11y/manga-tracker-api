@@ -30,8 +30,16 @@ export class AzError extends Error {
 
 const json = <T>(result: CommandResult): T => JSON.parse(result.stdout) as T;
 
-export async function isAzInstalled(run: Runner): Promise<boolean> {
-  return (await run(["which", "az"])).ok;
+/**
+ * `which` does not exist on Windows (no `cmd.exe`/PowerShell built-in), so the
+ * probe itself has to pick the right command instead of hoping one binary
+ * name works everywhere.
+ */
+export async function isAzInstalled(
+  run: Runner,
+  platform: NodeJS.Platform = process.platform,
+): Promise<boolean> {
+  return (await run([platform === "win32" ? "where" : "which", "az"])).ok;
 }
 
 /** Null when `az login` has not been run (or the token expired). */
