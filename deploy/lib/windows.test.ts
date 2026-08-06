@@ -6,6 +6,7 @@ import type { Runner } from "./run";
 import { createFakeRunner, type FakeResponse } from "./run";
 import {
   installTask,
+  isElevated,
   readConfigEnv,
   readSecret,
   reloadService,
@@ -109,9 +110,13 @@ describe("readSecret / writeSecret", () => {
   });
 
   it("returns null instead of the raw command output when nothing is cached", async () => {
-    // No SECRET_PATH file on disk: readSecret must short-circuit before
-    // invoking PowerShell at all.
-    expect(await readSecret(createFakeRunner([]).run)).toBeNull();
+    // The path is passed explicitly: defaulting to the real SECRET_PATH made
+    // this pass or fail depending on whether the machine running the suite had
+    // been bootstrapped. With no file there, readSecret must short-circuit
+    // before invoking PowerShell at all — the empty fake runner throws if it
+    // does not.
+    const missing = join(tmpdir(), "mangatracker-no-such-secret.dpapi");
+    expect(await readSecret(createFakeRunner([]).run, missing)).toBeNull();
   });
 });
 
@@ -175,6 +180,15 @@ describe("installTask", () => {
     expect(call).toContain("/F");
     // The default 72h limit would silently kill an indefinitely-running backend.
     expect(xml).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
+    // InteractiveToken would run the task in the user's session, where the
+    // cmd.exe wrapper opens a visible console window — closing it kills the
+    // backend. S4U runs in session 0, which has no console at all.
+    expect(xml).toContain("<LogonType>S4U</LogonType>");
+    expect(xml).not.toContain("InteractiveToken");
+    // Without an explicit descriptor, an elevated /Create leaves the user with
+    // read only, and reloadService (/End + /Run) needs execute.
+    expect(xml).toContain("<SecurityDescriptor>");
+    expect(xml).toContain("(A;;FRFX;;;BU)");
     expect(xml).toContain("C:\\Users\\gaston\\.bun\\bin\\bun.exe");
     expect(xml).toContain(
       "<WorkingDirectory>C:\\Users\\gaston\\Documents\\Git\\manga-tracker-api</WorkingDirectory>",
@@ -192,5 +206,42 @@ describe("installTask", () => {
     await expect(
       installTask(run, { bunPath: "bun.exe", workingDirectory: "C:\\repo" }),
     ).rejects.toThrow(/Access is denied/);
+  });
+
+  it("points at the leftover task even when Windows localizes the error", async () => {
+    // A Spanish install answers "Acceso denegado", so the remedy cannot be
+    // gated on the English string — it has to come out either way.
+    const run: Runner = async () => ({
+      ok: false,
+      code: 1,
+      stdout: "",
+      stderr: "Error: Acceso denegado.",
+    });
+
+    await expect(
+      installTask(run, { bunPath: "bun.exe", workingDirectory: "C:\\repo" }),
+    ).rejects.toThrow(
+      /Acceso denegado[\s\S]*schtasks \/Delete \/TN MangaTracker/,
+    );
+  });
+});
+
+describe("isElevated", () => {
+  it("reads PowerShell's literal True, not a localized string", async () => {
+    const fake = createFakeRunner([{ when: ["powershell"], stdout: "True" }]);
+    expect(await isElevated(fake.run)).toBe(true);
+    expect(fake.calls[0]?.join(" ")).toContain("WindowsBuiltInRole");
+  });
+
+  it("is false for an unelevated shell", async () => {
+    const fake = createFakeRunner([{ when: ["powershell"], stdout: "False" }]);
+    expect(await isElevated(fake.run)).toBe(false);
+  });
+
+  it("does not claim elevation when the probe itself fails", async () => {
+    // Answering "elevated" here would send the bootstrap into a /Create it
+    // cannot complete, after it has already provisioned the vault.
+    const fake = createFakeRunner([{ when: ["powershell"], code: 1 }]);
+    expect(await isElevated(fake.run)).toBe(false);
   });
 });
