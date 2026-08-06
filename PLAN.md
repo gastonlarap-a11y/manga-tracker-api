@@ -319,6 +319,10 @@ Docs: https://www.launchd.info/ · https://bun.sh/docs/runtime/http/server
    <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
      <RegistrationInfo>
        <Description>Manga Tracker backend (Bun + Hono), started at logon and kept alive.</Description>
+       <!-- Sin este descriptor explícito, un /Create elevado deja la tarea propiedad de
+            Administradores con el usuario en solo lectura, y `bun run deploy` (que hace
+            /End + /Run) queda atado a una terminal elevada para siempre. BU = grupo Usuarios. -->
+       <SecurityDescriptor>D:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFX;;;BU)</SecurityDescriptor>
      </RegistrationInfo>
      <Triggers>
        <LogonTrigger>
@@ -329,7 +333,12 @@ Docs: https://www.launchd.info/ · https://bun.sh/docs/runtime/http/server
      <Principals>
        <Principal id="Author">
          <UserId>DESKTOP-XXXX\gaston</UserId>
-         <!-- S4U: sobrevive bloqueo de pantalla / logoff sin guardar la contraseña del usuario. -->
+         <!-- S4U, NO InteractiveToken: S4U corre en la sesión 0, sin consola. InteractiveToken
+              corre en la sesión del usuario y el cmd.exe de abajo abre una ventana negra visible
+              que, al cerrarla, mata el backend (LastTaskResult 0xC000013A + ^C en err.log). S4U
+              además sigue corriendo con la sesión cerrada. Registrarlo exige terminal elevada;
+              el <SecurityDescriptor> de arriba es lo que evita que eso deje al usuario sin
+              permiso de /Run y /End. -->
          <LogonType>S4U</LogonType>
          <RunLevel>LeastPrivilege</RunLevel>
        </Principal>
