@@ -50,9 +50,12 @@ export async function resolveSecret(
     return { value: fromCache, from: "cache" };
   }
 
-  if (!(await isAzInstalled(run))) {
+  // Both of these follow the adapter, not the host: the probe is `where` on
+  // Windows and `which` everywhere else, and a test that pins the adapter must
+  // get that adapter's commands whatever machine it runs on.
+  if (!(await isAzInstalled(run, platform.os))) {
     const installHint =
-      process.platform === "win32"
+      platform.os === "win32"
         ? "winget install -e --id Microsoft.AzureCLI"
         : "brew install azure-cli";
     onStep(

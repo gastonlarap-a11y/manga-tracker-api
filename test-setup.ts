@@ -40,6 +40,14 @@ db.close();
 
 afterAll(() => {
   for (const suffix of ["", "-journal", "-wal", "-shm"]) {
-    rmSync(dbPath + suffix, { force: true });
+    try {
+      rmSync(dbPath + suffix, { force: true });
+    } catch {
+      // Windows refuses to unlink a file that still has an open handle, and the
+      // process-wide PrismaClient is never disconnected — so this throws EBUSY
+      // there and failed the whole run after every test had already passed. The
+      // file is a pid-stamped throwaway in the OS temp directory; leaving it for
+      // the OS to reclaim is the lesser problem.
+    }
   }
 });

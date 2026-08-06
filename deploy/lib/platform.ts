@@ -10,6 +10,14 @@ import type { Runner } from "./run";
 import * as windows from "./windows";
 
 export interface PlatformAdapter {
+  /**
+   * The platform whose command names this adapter speaks — `which` vs `where`,
+   * brew vs winget. `secrets.ts` reads it from here instead of from
+   * `process.platform` so its cascade can be tested from any host: a Windows
+   * machine running the suite must still exercise the macOS path with macOS
+   * commands. Linux gets the macOS adapter, and the POSIX names fit it too.
+   */
+  readonly os: NodeJS.Platform;
   /** Identity passed to the service manager (a launchd label / task name). */
   readonly serviceLabel: string;
   readonly configPath: string;
@@ -30,6 +38,7 @@ export interface PlatformAdapter {
 }
 
 export const macosAdapter: PlatformAdapter = {
+  os: "darwin",
   serviceLabel: macos.LAUNCHD_LABEL,
   configPath: macos.PLIST_PATH,
   configLabel: "plist",
@@ -46,6 +55,7 @@ export const macosAdapter: PlatformAdapter = {
 };
 
 export const windowsAdapter: PlatformAdapter = {
+  os: "win32",
   serviceLabel: windows.TASK_NAME,
   configPath: windows.CONFIG_PATH,
   configLabel: "prod.env",

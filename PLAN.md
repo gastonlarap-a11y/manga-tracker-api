@@ -329,7 +329,13 @@ Docs: https://www.launchd.info/ · https://bun.sh/docs/runtime/http/server
      <Principals>
        <Principal id="Author">
          <UserId>DESKTOP-XXXX\gaston</UserId>
-         <!-- S4U: sobrevive bloqueo de pantalla / logoff sin guardar la contraseña del usuario. -->
+         <!-- S4U, NO InteractiveToken: S4U corre en la sesión 0, sin consola. InteractiveToken
+              corre en la sesión del usuario y el cmd.exe de abajo abre una ventana negra visible
+              que, al cerrarla, mata el backend (LastTaskResult 0xC000013A + ^C en err.log). S4U
+              además sigue corriendo con la sesión cerrada. Registrarlo exige terminal elevada, y
+              eso deja la tarea propiedad de Administradores con el usuario en solo lectura: hay
+              que devolverle el permiso con icacls (paso 3). El <SecurityDescriptor> del propio
+              XML NO sirve — schtasks /Create /XML lo ignora. -->
          <LogonType>S4U</LogonType>
          <RunLevel>LeastPrivilege</RunLevel>
        </Principal>
@@ -356,10 +362,15 @@ Docs: https://www.launchd.info/ · https://bun.sh/docs/runtime/http/server
    </Task>
    ```
 
-3. Registrar la tarea (sobrescribe si ya existe):
+3. Registrar la tarea (sobrescribe si ya existe) **desde una terminal elevada** — S4U lo exige — y
+   devolverle a tu cuenta el permiso de ejecutarla, que ese `/Create` elevado le quita:
    ```powershell
    schtasks /Create /XML MangaTracker-task.xml /TN MangaTracker /F
+   icacls "$env:SystemRoot\System32\Tasks\MangaTracker" /grant "$env:USERNAME:(RX)"
    ```
+   Sin el `icacls`, la tarea queda propiedad de Administradores con vos en solo lectura, y
+   `bun run deploy` (que hace `/End` + `/Run`) necesitaría terminal elevada para siempre. `(RX)` y
+   no más: redefinir la tarea sigue exigiendo elevación.
 
 4. `bun run env:pull --prod` escribe `%LOCALAPPDATA%\MangaTracker\prod.env` (el equivalente del
    plist) con `MONGODB_URL` resuelto desde Key Vault. Recién ahí `bun run deploy` (o
