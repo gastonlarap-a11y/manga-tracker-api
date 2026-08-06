@@ -16,7 +16,9 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   `sync:bootstrap` (thin alias of `env:pull --prod`)
 - `deploy/` — deployment and configuration tooling, outside `src/` because it never ships with
   the app: `provision.ts` (Key Vault), `env-push.ts` / `env-pull.ts` (secrets), `deploy.ts` (the
-  one-command publish), `lib/` (a `Runner`-injected wrapper per external tool: `az`, plus one
+  one-command publish), `bootstrap-windows.ts` (first-time install on a new Windows machine —
+  provisions, registers the scheduled task, and builds the sibling dashboard/extension repos;
+  `bun run setup:windows`), `lib/` (a `Runner`-injected wrapper per external tool: `az`, plus one
   machine-specific module per OS — `macos.ts` wraps `plutil`/`security`/`launchctl`, `windows.ts`
   wraps `icacls`/`powershell`/`schtasks` — selected at runtime by `platform.ts`, which the four
   top-level scripts and `secrets.ts` depend on instead of importing either directly), and

@@ -286,8 +286,19 @@ Docs: https://www.launchd.info/ · https://bun.sh/docs/runtime/http/server
 > usuario) y mismo `KeepAlive` (`RestartOnFailure`).
 >
 > `deploy/lib/windows.ts` asume que esta tarea ya existe (`reloadService` hace `schtasks /End` +
-> `/Run`), igual que `deploy.ts` en Mac asume que el LaunchAgent ya está instalado — la primera
-> instalación es manual en ambos casos, no hay un `bun run deploy:install-service`.
+> `/Run`), igual que `deploy.ts` en Mac asume que el LaunchAgent ya está instalado.
+
+> **Vía rápida:** en una máquina Windows nueva, con Bun instalado, este repo clonado + `bun
+> install`, y `az login` ya hecho, `bun run setup:windows` (`deploy/bootstrap-windows.ts`) hace
+> todo lo de abajo por vos: provisiona el vault, prepara las carpetas, siembra `prod.env`,
+> registra la tarea (`installTask` en `deploy/lib/windows.ts` — mismo XML que el paso 2, con `/F`
+> para poder re-correrlo sin que falle si ya existe), tira `bun run deploy --with-env`, y clona +
+> instala + compila `manga-tracker-dashboard` y `manga-tracker-extension` como repos hermanos. El
+> único paso que deja manual es cargar la extensión "unpacked" en Chrome — no hay forma de
+> automatizarlo sin políticas de registro de Windows, e imprime la ruta exacta al terminar.
+>
+> Los pasos de abajo son el detalle manual — la referencia de qué hace el script por dentro, y el
+> fallback si algo falla a mitad de camino.
 
 1. Preparar la carpeta de datos y la base de producción (equivalente a
    `~/Library/Application Support/MangaTracker`):

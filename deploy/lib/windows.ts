@@ -19,10 +19,13 @@ import { type EnvLine, parseEnvFile, serializeEnvFile } from "./env";
 import type { Runner } from "./run";
 
 export const TASK_NAME = "MangaTracker";
-const CONFIG_DIR = join(homedir(), "AppData", "Local", "MangaTracker");
+export const CONFIG_DIR = join(homedir(), "AppData", "Local", "MangaTracker");
 export const CONFIG_PATH = join(CONFIG_DIR, "prod.env");
-export const SECRET_PATH = join(CONFIG_DIR, "secrets", "mongodb-url.dpapi");
-export const LOG_PATH = join(CONFIG_DIR, "logs", "err.log");
+export const SECRET_DIR = join(CONFIG_DIR, "secrets");
+export const SECRET_PATH = join(SECRET_DIR, "mongodb-url.dpapi");
+export const LOG_DIR = join(CONFIG_DIR, "logs");
+export const OUT_LOG_PATH = join(LOG_DIR, "out.log");
+export const LOG_PATH = join(LOG_DIR, "err.log");
 
 // ---------------------------------------------------------------------------
 // prod.env — the plist's equivalent: where production's resolved values live
@@ -129,7 +132,6 @@ export async function writeSecret(
   const file = join(dir, "value");
   try {
     await Bun.write(file, value);
-    const secretsDir = join(CONFIG_DIR, "secrets");
     const result = await run([
       "powershell",
       "-NoProfile",
@@ -137,7 +139,7 @@ export async function writeSecret(
       "-Command",
       `$plain = Get-Content -Raw -Path '${file}'; ` +
         `$secure = ConvertTo-SecureString -String $plain -AsPlainText -Force; ` +
-        `New-Item -ItemType Directory -Force -Path '${secretsDir}' | Out-Null; ` +
+        `New-Item -ItemType Directory -Force -Path '${SECRET_DIR}' | Out-Null; ` +
         `ConvertFrom-SecureString -SecureString $secure | Set-Content -NoNewline -Path '${SECRET_PATH}'`,
     ]);
     return result.ok;
@@ -210,5 +212,88 @@ export async function reloadService(
         `The service is now DOWN. Bring it back with:\n` +
         `  schtasks /Run /TN ${name}`,
     );
+  }
+}
+
+export interface InstallTaskOptions {
+  readonly name?: string;
+  readonly bunPath: string;
+  readonly workingDirectory: string;
+}
+
+/**
+ * Registers the scheduled task, the one-time step a LaunchAgent gets by
+ * copying its plist by hand. `/F` makes this idempotent: re-running the
+ * bootstrap overwrites rather than fails on an already-registered task.
+ *
+ * `ExecutionTimeLimit` is `PT0S` (unlimited) on purpose — Task Scheduler's
+ * default kills a task after 72 hours, which a backend meant to run
+ * indefinitely cannot have. `LogonType` is `S4U` so the task survives a
+ * locked screen without storing the user's password.
+ */
+export async function installTask(
+  run: Runner,
+  { name = TASK_NAME, bunPath, workingDirectory }: InstallTaskOptions,
+): Promise<void> {
+  const user = `${process.env.COMPUTERNAME ?? ""}\\${userInfo().username}`;
+  const xml = `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Manga Tracker backend (Bun + Hono), started at logon and kept alive.</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>${user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>${user}</UserId>
+      <LogonType>S4U</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>cmd.exe</Command>
+      <Arguments>/c ""${bunPath}" --env-file="${CONFIG_PATH}" run src\\index.ts >> "${OUT_LOG_PATH}" 2>> "${LOG_PATH}""</Arguments>
+      <WorkingDirectory>${workingDirectory}</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>`;
+
+  const dir = await mkdtemp(join(tmpdir(), "mangatracker-task-"));
+  const file = join(dir, "task.xml");
+  try {
+    await Bun.write(file, xml);
+    const result = await run([
+      "schtasks",
+      "/Create",
+      "/XML",
+      file,
+      "/TN",
+      name,
+      "/F",
+    ]);
+    if (!result.ok) {
+      throw new Error(
+        `schtasks /Create failed: ${result.stderr || result.stdout}`,
+      );
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
   }
 }

@@ -32,6 +32,14 @@ speak the SCM's control protocol, which `bun.exe` doesn't implement). Config liv
 secret cache (the Keychain's equivalent) is a DPAPI-encrypted file at
 `%LOCALAPPDATA%\MangaTracker\secrets\mongodb-url.dpapi`, tied to this user and this machine.
 
+**First install on a new Windows machine:** `bun run setup:windows`
+(`deploy/bootstrap-windows.ts`) does everything below in one shot — provisions the vault,
+registers the scheduled task, pulls secrets, migrates, starts the backend, and builds the
+sibling `manga-tracker-dashboard` / `manga-tracker-extension` repos. Prerequisites it cannot do
+for you: Bun installed, this repo cloned + `bun install`ed, and `az login`. The only step it
+leaves manual is loading the extension "unpacked" in Chrome (its own limitation, not this
+project's — Chrome blocks scripted installs of unpacked extensions).
+
 ## Publish a change
 
 ```bash

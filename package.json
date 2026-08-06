@@ -14,7 +14,8 @@
     "deploy:provision": "bun run deploy/provision.ts",
     "env:push": "bun run deploy/env-push.ts",
     "env:pull": "bun run deploy/env-pull.ts",
-    "env:show": "bun run deploy/env-show.ts"
+    "env:show": "bun run deploy/env-show.ts",
+    "setup:windows": "bun run deploy/bootstrap-windows.ts"
   },
   "dependencies": {
     "@hono/swagger-ui": "^0.6.1",

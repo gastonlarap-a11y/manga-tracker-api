@@ -3,6 +3,7 @@ import {
   assignSecretsOfficer,
   createVault,
   getSecret,
+  isAzInstalled,
   isVaultNameAvailable,
   SECRETS_OFFICER_ROLE_ID,
 } from "./az";
@@ -114,6 +115,20 @@ describe("getSecret", () => {
       },
     ]);
     expect(getSecret(fake.run, VAULT, "x")).rejects.toThrow(/Forbidden/);
+  });
+});
+
+describe("isAzInstalled", () => {
+  it("probes with `which` by default", async () => {
+    const fake = createFakeRunner([{ when: ["which", "az"] }]);
+    expect(await isAzInstalled(fake.run)).toBe(true);
+    expect(fake.calls[0]).toEqual(["which", "az"]);
+  });
+
+  it("probes with `where` on Windows, since `which` does not exist there", async () => {
+    const fake = createFakeRunner([{ when: ["where", "az"] }]);
+    expect(await isAzInstalled(fake.run, "win32")).toBe(true);
+    expect(fake.calls[0]).toEqual(["where", "az"]);
   });
 });
 
