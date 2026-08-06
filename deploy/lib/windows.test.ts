@@ -158,23 +158,32 @@ describe("readConfigEnv / writeConfigEnv", () => {
 });
 
 describe("installTask", () => {
-  it("writes a task with no execution time limit and registers it with /F", async () => {
+  /** Captures every command plus the XML that reached `schtasks /Create`. */
+  function recordingRunner(icaclsOk = true) {
+    const calls: (readonly string[])[] = [];
     let xml = "";
-    let call: readonly string[] = [];
     const run: Runner = async (command) => {
-      call = command;
+      calls.push(command);
       const xmlIndex = command.indexOf("/XML");
       if (xmlIndex >= 0) {
         xml = await Bun.file(command[xmlIndex + 1] ?? "").text();
       }
-      return { ok: true, code: 0, stdout: "", stderr: "" };
+      const ok = command[0] !== "icacls" || icaclsOk;
+      return { ok, code: ok ? 0 : 1, stdout: "", stderr: "" };
     };
+    return { run, calls, xml: () => xml };
+  }
 
-    await installTask(run, {
+  it("writes a task with no execution time limit and registers it with /F", async () => {
+    const fake = recordingRunner();
+
+    await installTask(fake.run, {
       bunPath: "C:\\Users\\gaston\\.bun\\bin\\bun.exe",
       workingDirectory: "C:\\Users\\gaston\\Documents\\Git\\manga-tracker-api",
     });
 
+    const xml = fake.xml();
+    const call = fake.calls[0] ?? [];
     expect(call[0]).toBe("schtasks");
     expect(call).toContain("/Create");
     expect(call).toContain("/F");
@@ -185,14 +194,48 @@ describe("installTask", () => {
     // backend. S4U runs in session 0, which has no console at all.
     expect(xml).toContain("<LogonType>S4U</LogonType>");
     expect(xml).not.toContain("InteractiveToken");
-    // Without an explicit descriptor, an elevated /Create leaves the user with
-    // read only, and reloadService (/End + /Run) needs execute.
-    expect(xml).toContain("<SecurityDescriptor>");
-    expect(xml).toContain("(A;;FRFX;;;BU)");
+    // An elevated /Create leaves the invoking user with read only, and
+    // reloadService (/End + /Run) needs execute. The XML's own
+    // <SecurityDescriptor> element does not work — schtasks ignores it — so the
+    // grant has to happen through icacls afterwards.
+    expect(xml).not.toContain("<SecurityDescriptor>");
     expect(xml).toContain("C:\\Users\\gaston\\.bun\\bin\\bun.exe");
     expect(xml).toContain(
       "<WorkingDirectory>C:\\Users\\gaston\\Documents\\Git\\manga-tracker-api</WorkingDirectory>",
     );
+  });
+
+  it("grants the user read+execute on the task file, and nothing more", async () => {
+    // Without this the elevated /Create leaves the user on read-only and every
+    // `bun run deploy` needs an elevated terminal, because reloadService is
+    // schtasks /End + /Run. Write is deliberately not granted: redefining the
+    // task should still take elevation.
+    const fake = recordingRunner();
+
+    const outcome = await installTask(fake.run, {
+      bunPath: "bun.exe",
+      workingDirectory: "C:\\repo",
+    });
+
+    const grant = fake.calls.find((call) => call[0] === "icacls") ?? [];
+    expect(grant[1]).toContain("System32");
+    expect(grant[1]).toContain("Tasks");
+    expect(grant).toContain("/grant");
+    expect(grant.at(-1)).toMatch(/:\(RX\)$/);
+    expect(outcome.userCanControlIt).toBe(true);
+  });
+
+  it("reports a failed grant instead of pretending the install is complete", async () => {
+    // The task still runs, so this is not fatal — but the caller has to be able
+    // to say that deploys will need elevation until it is fixed.
+    const fake = recordingRunner(false);
+
+    const outcome = await installTask(fake.run, {
+      bunPath: "bun.exe",
+      workingDirectory: "C:\\repo",
+    });
+
+    expect(outcome.userCanControlIt).toBe(false);
   });
 
   it("throws with the value still readable when schtasks rejects the definition", async () => {

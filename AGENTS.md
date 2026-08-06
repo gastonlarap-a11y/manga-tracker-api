@@ -64,13 +64,15 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   and deploy all derive their behaviour from that classification. There is deliberately no
   per-environment file tree: Bun only auto-loads `.env`, `.env.<NODE_ENV>` and `.env.local` from
   the cwd, and `.gitignore` covers `.env*` but would not cover a nested `env/` directory.
-- The Windows scheduled task is `LogonType=S4U` **plus an explicit `<SecurityDescriptor>`**, and
-  both halves matter. `InteractiveToken` runs it in the user's session, where the `cmd.exe`
-  wrapper opens a visible console window — closing it kills the backend (`LastTaskResult
-  0xC000013A` + a trailing `^C` in err.log). S4U runs in session 0, with no console at all. But
-  S4U needs elevation to register, and the default descriptor then owns the task as
-  `Administrators` with the user on read-only, locking that user out of the `/Run` and `/End` in
-  `reloadService` — hence `(A;;FRFX;;;BU)`. Consequence: `bun run setup:windows` needs an
+- The Windows scheduled task is `LogonType=S4U` **plus an `icacls` grant afterwards**, and both
+  halves matter. `InteractiveToken` runs it in the user's session, where the `cmd.exe` wrapper
+  opens a visible console window — closing it kills the backend (`LastTaskResult 0xC000013A` +
+  a trailing `^C` in err.log). S4U runs in session 0, with no console at all. But S4U needs
+  elevation to register, and the task is then owned by `Administrators` with the user on
+  read-only, locking that user out of the `/Run` and `/End` in `reloadService`. The grant must go
+  through `icacls` on the task's file in `System32\Tasks`: `schtasks /Create /XML` **silently
+  ignores** the `<SecurityDescriptor>` element the schema defines (verified — the registered task
+  came back with an inherited `D:AI(...)` DACL). Consequence: `bun run setup:windows` needs an
   elevated terminal once; nothing else does.
 - `MONGODB_URL` is stored in direct form (`mongodb://host:10260/?tls=true&…`), never
   `mongodb+srv://`. Bun on Windows does not read the system DNS servers — `dns.getServers()`

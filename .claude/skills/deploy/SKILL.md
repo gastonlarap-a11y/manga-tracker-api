@@ -35,11 +35,12 @@ secret cache (the Keychain's equivalent) is a DPAPI-encrypted file at
 The task is `LogonType=S4U`, so it runs in session 0 and never opens a console window
 (`InteractiveToken` does, and closing that window kills the backend). Registering S4U needs an
 elevated terminal, which is why `bun run setup:windows` checks for elevation before it does
-anything else. Day-to-day `bun run deploy` does **not** need it: the task XML carries an explicit
-`<SecurityDescriptor>` granting the local Users group read+execute, without which an
-elevated-created task leaves the user unable to `/Run` or `/End` it. A leftover task from an
-earlier install can block re-registration; clear it with `schtasks /Delete /TN MangaTracker /F`
-(the error from `installTask` says so too).
+anything else. Day-to-day `bun run deploy` does **not** need it: right after `/Create`,
+`installTask` runs `icacls` on `%SystemRoot%\System32\Tasks\MangaTracker` to grant your account
+`(RX)`, without which an elevated-created task leaves you unable to `/Run` or `/End` it. It has to
+be `icacls` — `schtasks /Create /XML` ignores the XML's own `<SecurityDescriptor>`. A leftover
+task from an earlier install can block re-registration; clear it with
+`schtasks /Delete /TN MangaTracker /F` (the error from `installTask` says so too).
 
 **First install on a new Windows machine:** `bun run setup:windows`
 (`deploy/bootstrap-windows.ts`) does everything below in one shot — provisions the vault,
