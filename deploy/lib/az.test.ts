@@ -119,9 +119,12 @@ describe("getSecret", () => {
 });
 
 describe("isAzInstalled", () => {
-  it("probes with `which` by default", async () => {
+  // The platform is passed explicitly rather than left to default to
+  // `process.platform`: otherwise the assertion is about the host running the
+  // suite, and this exact test failed on Windows for that reason.
+  it("probes with `which` on macOS", async () => {
     const fake = createFakeRunner([{ when: ["which", "az"] }]);
-    expect(await isAzInstalled(fake.run)).toBe(true);
+    expect(await isAzInstalled(fake.run, "darwin")).toBe(true);
     expect(fake.calls[0]).toEqual(["which", "az"]);
   });
 

@@ -115,8 +115,14 @@ export async function writePlistEnv(
 // launchd
 // ---------------------------------------------------------------------------
 
-const domain = (): string => {
-  const uid = process.getuid?.();
+/**
+ * launchd domains are per-user, so every command carries the uid. It is the one
+ * thing here that is read straight off the process instead of arriving through
+ * a `Runner`, which made the whole reload sequence untestable from a machine
+ * with no uid — `bun test` on Windows failed on four tests that only ever
+ * assert how the launchctl commands are built. Callers may pass one in.
+ */
+const domain = (uid = process.getuid?.()): string => {
   if (uid === undefined) {
     throw new Error("launchd control needs a uid; this is macOS-only");
   }
@@ -126,8 +132,9 @@ const domain = (): string => {
 export async function isLoaded(
   run: Runner,
   label = LAUNCHD_LABEL,
+  uid?: number,
 ): Promise<boolean> {
-  return (await run(["launchctl", "print", `${domain()}/${label}`])).ok;
+  return (await run(["launchctl", "print", `${domain(uid)}/${label}`])).ok;
 }
 
 export interface ReloadOptions {
@@ -137,6 +144,8 @@ export interface ReloadOptions {
   readonly settleAttempts?: number;
   readonly settleDelayMs?: number;
   readonly bootstrapAttempts?: number;
+  /** Defaults to this process's uid; tests pass one so they run off a Mac. */
+  readonly uid?: number;
 }
 
 /**
@@ -160,13 +169,14 @@ export async function reloadService(
     settleAttempts = 20,
     settleDelayMs = 250,
     bootstrapAttempts = 3,
+    uid,
   }: ReloadOptions = {},
 ): Promise<void> {
   // bootout fails when the service is not loaded, which is a fine starting state.
-  await run(["launchctl", "bootout", `${domain()}/${label}`]);
+  await run(["launchctl", "bootout", `${domain(uid)}/${label}`]);
 
   for (let attempt = 0; attempt < settleAttempts; attempt++) {
-    if (!(await isLoaded(run, label))) {
+    if (!(await isLoaded(run, label, uid))) {
       break;
     }
     await Bun.sleep(settleDelayMs);
@@ -174,10 +184,10 @@ export async function reloadService(
 
   // Teardown can still be settling after `print` stops finding the job, so the
   // bootstrap itself gets a few tries before we call it a failure.
-  let last = await run(["launchctl", "bootstrap", domain(), path]);
+  let last = await run(["launchctl", "bootstrap", domain(uid), path]);
   for (let attempt = 1; attempt < bootstrapAttempts && !last.ok; attempt++) {
     await Bun.sleep(settleDelayMs * 2);
-    last = await run(["launchctl", "bootstrap", domain(), path]);
+    last = await run(["launchctl", "bootstrap", domain(uid), path]);
   }
 
   if (!last.ok) {
@@ -185,7 +195,7 @@ export async function reloadService(
       `launchctl bootstrap failed after ${bootstrapAttempts} attempts: ` +
         `${last.stderr || last.stdout}\n` +
         `The service is now DOWN. Bring it back with:\n` +
-        `  launchctl bootstrap ${domain()} ${path}`,
+        `  launchctl bootstrap ${domain(uid)} ${path}`,
     );
   }
 }
