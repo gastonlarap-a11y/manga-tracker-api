@@ -9,10 +9,10 @@
  */
 import { getSecret, isAzInstalled, setSecret } from "./az";
 import type { EnvSpec } from "./env";
-import { readKeychain, readPlistEnv, writeKeychain } from "./macos";
+import type { PlatformAdapter } from "./platform";
 import type { Runner } from "./run";
 
-export type SecretOrigin = "plist" | "keychain" | "keyvault";
+export type SecretOrigin = "config" | "cache" | "keyvault";
 
 export interface ResolvedSecret {
   readonly value: string;
@@ -24,7 +24,8 @@ export type SecretSpec = EnvSpec & { kind: "secret" };
 export interface ResolveOptions {
   /** Skipped when the vault is unreachable or `az` is missing. */
   readonly vault: string;
-  /** Writes anything found further down the cascade back to the Keychain. */
+  readonly platform: PlatformAdapter;
+  /** Writes anything found further down the cascade back to the local cache. */
   readonly cache?: boolean;
   readonly onStep?: (message: string) => void;
 }
@@ -32,27 +33,31 @@ export interface ResolveOptions {
 export async function resolveSecret(
   run: Runner,
   spec: SecretSpec,
-  { vault, cache = true, onStep = () => {} }: ResolveOptions,
+  { vault, platform, cache = true, onStep = () => {} }: ResolveOptions,
 ): Promise<ResolvedSecret | null> {
-  const fromPlist = await readPlistEnv(run, spec.name);
-  if (fromPlist !== null) {
-    onStep(`${spec.name}: found in the LaunchAgent plist`);
+  const fromConfig = await platform.readConfigEnv(run, spec.name);
+  if (fromConfig !== null) {
+    onStep(`${spec.name}: found in the ${platform.configLabel}`);
     if (cache) {
-      await writeKeychain(run, fromPlist);
+      await platform.writeSecret(run, fromConfig);
     }
-    return { value: fromPlist, from: "plist" };
+    return { value: fromConfig, from: "config" };
   }
 
-  const fromKeychain = await readKeychain(run);
-  if (fromKeychain !== null) {
-    onStep(`${spec.name}: found in the Keychain`);
-    return { value: fromKeychain, from: "keychain" };
+  const fromCache = await platform.readSecret(run);
+  if (fromCache !== null) {
+    onStep(`${spec.name}: found in the ${platform.secretCacheLabel}`);
+    return { value: fromCache, from: "cache" };
   }
 
   if (!(await isAzInstalled(run))) {
+    const installHint =
+      process.platform === "win32"
+        ? "winget install -e --id Microsoft.AzureCLI"
+        : "brew install azure-cli";
     onStep(
       `${spec.name}: not local, and the Azure CLI is missing — ` +
-        "`brew install azure-cli` then `az login`",
+        `\`${installHint}\` then \`az login\``,
     );
     return null;
   }
@@ -64,7 +69,7 @@ export async function resolveSecret(
   }
   onStep(`${spec.name}: recovered from Key Vault`);
   if (cache) {
-    await writeKeychain(run, fromVault);
+    await platform.writeSecret(run, fromVault);
   }
   return { value: fromVault, from: "keyvault" };
 }

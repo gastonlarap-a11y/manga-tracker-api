@@ -19,7 +19,11 @@ export type EnvSpec = {
   | { readonly kind: "profile"; readonly dev: string; readonly prod: string }
   | {
       readonly kind: "machine";
-      readonly resolve: (home: string, profile: Profile) => string;
+      readonly resolve: (
+        home: string,
+        profile: Profile,
+        platform: NodeJS.Platform,
+      ) => string;
     }
 );
 
@@ -29,10 +33,16 @@ export const ENV_MANIFEST: readonly EnvSpec[] = [
     kind: "machine",
     comment:
       "SQLite file. Dev keeps its own so running the server never touches production data.",
-    resolve: (home, profile) =>
-      profile === "prod"
-        ? `file:${home}/Library/Application Support/MangaTracker/mangatracker.db`
-        : "file:./dev.db",
+    resolve: (home, profile, platform) => {
+      if (profile !== "prod") {
+        return "file:./dev.db";
+      }
+      // libsql's `file:` parser keeps the path raw (no triple-slash required),
+      // so a forward-slashed Windows path round-trips fine.
+      return platform === "win32"
+        ? `file:${home.replaceAll("\\", "/")}/AppData/Local/MangaTracker/mangatracker.db`
+        : `file:${home}/Library/Application Support/MangaTracker/mangatracker.db`;
+    },
   },
   {
     name: "PORT",
@@ -72,6 +82,7 @@ export function resolveSpec(
   profile: Profile,
   home: string,
   secrets: ReadonlyMap<string, string>,
+  platform: NodeJS.Platform = process.platform,
 ): string | null {
   switch (spec.kind) {
     case "secret":
@@ -79,7 +90,7 @@ export function resolveSpec(
     case "profile":
       return profile === "prod" ? spec.prod : spec.dev;
     case "machine":
-      return spec.resolve(home, profile);
+      return spec.resolve(home, profile, platform);
   }
 }
 

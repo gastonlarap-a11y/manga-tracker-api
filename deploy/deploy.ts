@@ -13,13 +13,8 @@
  */
 import { homedir } from "node:os";
 import { ENV_MANIFEST, resolveSpec } from "./lib/env";
-import {
-  LAUNCHD_LABEL,
-  PLIST_PATH,
-  plistExists,
-  reloadService,
-  waitForHealth,
-} from "./lib/macos";
+import { waitForHealth } from "./lib/health";
+import { platform } from "./lib/platform";
 import { runVisible, spawnRunner } from "./lib/run";
 import { done, fail, heading, installErrorHandler, step, warn } from "./lib/ui";
 
@@ -48,9 +43,9 @@ const port = Number(prodValue("PORT"));
 
 heading(dryRun ? "Deploy (dry run)" : "Deploy");
 
-if (!(await plistExists())) {
+if (!(await platform.configExists())) {
   fail(
-    `no LaunchAgent at ${PLIST_PATH}`,
+    `no ${platform.serviceKind} at ${platform.configPath}`,
     "Production is not installed on this machine. See .claude/skills/deploy/.",
   );
 }
@@ -118,22 +113,22 @@ if (dryRun) {
 
 // --- restart -----------------------------------------------------------------------
 
-heading("Reloading the LaunchAgent…");
+heading(`Reloading the ${platform.serviceKind}…`);
 if (dryRun) {
-  step(`Would bootout + bootstrap ${LAUNCHD_LABEL}.`);
+  step(`Would ${platform.reloadVerb} ${platform.serviceLabel}.`);
   done("Dry run complete. Nothing was changed.");
   process.exit(0);
 }
 
-// reloadService throws with the manual recovery command if bootstrap fails, so
-// a broken deploy never leaves the service quietly down.
-await reloadService(run);
+// reloadService throws with the manual recovery command if it fails, so a
+// broken deploy never leaves the service quietly down.
+await platform.reloadService(run);
 
 const health = await waitForHealth(port);
 if (!health.ok) {
   fail(
     `the service did not become healthy on port ${port}: ${health.detail}`,
-    `Logs:\n  tail -n 50 ~/Library/Logs/MangaTracker/err.log`,
+    `Logs:\n${platform.logsHint}`,
   );
 }
 done(`Healthy on port ${port}.`);

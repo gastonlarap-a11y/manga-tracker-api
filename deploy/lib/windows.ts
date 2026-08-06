@@ -1,0 +1,214 @@
+/**
+ * Everything that is specific to this Windows machine: the scheduled task,
+ * its `prod.env`, and a DPAPI-encrypted secret cache. Kept apart from `az.ts`
+ * because none of it has a cloud equivalent — this is the machine, not the
+ * account. Mirrors `macos.ts` function for function; `platform.ts` wires both
+ * into the shape the deploy scripts share.
+ *
+ * There is no Windows Service here on purpose: `sc.exe` requires the target
+ * binary to implement the SCM's start/stop control protocol
+ * (`StartServiceCtrlDispatcher`), which `bun.exe` does not — a service
+ * pointed at it fails at start with Error 1053. Task Scheduler has no such
+ * requirement; it supervises a PID like any process launcher, which is a
+ * closer match to what a LaunchAgent does anyway.
+ */
+import { mkdtemp, rm } from "node:fs/promises";
+import { homedir, tmpdir, userInfo } from "node:os";
+import { join } from "node:path";
+import { type EnvLine, parseEnvFile, serializeEnvFile } from "./env";
+import type { Runner } from "./run";
+
+export const TASK_NAME = "MangaTracker";
+const CONFIG_DIR = join(homedir(), "AppData", "Local", "MangaTracker");
+export const CONFIG_PATH = join(CONFIG_DIR, "prod.env");
+export const SECRET_PATH = join(CONFIG_DIR, "secrets", "mongodb-url.dpapi");
+export const LOG_PATH = join(CONFIG_DIR, "logs", "err.log");
+
+// ---------------------------------------------------------------------------
+// prod.env — the plist's equivalent: where production's resolved values live
+// ---------------------------------------------------------------------------
+
+export async function configExists(path = CONFIG_PATH): Promise<boolean> {
+  return await Bun.file(path).exists();
+}
+
+export async function readConfigEnv(
+  _run: Runner,
+  key: string,
+  path = CONFIG_PATH,
+): Promise<string | null> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) {
+    return null;
+  }
+  const entry = parseEnvFile(await file.text()).find(
+    (line): line is EnvLine & { kind: "entry" } =>
+      line.kind === "entry" && line.key === key,
+  );
+  return entry?.value ?? null;
+}
+
+/** Replaces the entry in place, or appends it — no comment, unlike the dev .env. */
+function upsertRaw(
+  lines: readonly EnvLine[],
+  key: string,
+  value: string,
+): EnvLine[] {
+  const index = lines.findIndex(
+    (line) => line.kind === "entry" && line.key === key,
+  );
+  const entry: EnvLine = { kind: "entry", key, value };
+  return index >= 0 ? lines.with(index, entry) : [...lines, entry];
+}
+
+/**
+ * Tightens permissions with `icacls` after every write, the same reason
+ * `macos.ts` chmods the plist: this file holds the cluster password in
+ * plaintext. `fs.chmod` on Windows only toggles the read-only bit, not real
+ * ACLs, so the restriction has to go through a real Windows tool.
+ */
+export async function writeConfigEnv(
+  run: Runner,
+  key: string,
+  value: string,
+  path = CONFIG_PATH,
+): Promise<boolean> {
+  const file = Bun.file(path);
+  const existing = (await file.exists()) ? await file.text() : "";
+  await Bun.write(
+    path,
+    serializeEnvFile(upsertRaw(parseEnvFile(existing), key, value)),
+  );
+  const result = await run([
+    "icacls",
+    path,
+    "/inheritance:r",
+    "/grant:r",
+    `${userInfo().username}:F`,
+  ]);
+  return result.ok;
+}
+
+// ---------------------------------------------------------------------------
+// DPAPI secret cache — the Keychain's equivalent
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads back through PowerShell's own DPAPI unwrap. The value never touches
+ * argv — only a path does — so it cannot leak through `ps`/Task Manager.
+ * `Microsoft.PowerShell.Security` ships with every Windows install, so this
+ * needs nothing installed, unlike the `CredentialManager` module.
+ */
+export async function readSecret(run: Runner): Promise<string | null> {
+  if (!(await Bun.file(SECRET_PATH).exists())) {
+    return null;
+  }
+  const result = await run([
+    "powershell",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    `$enc = Get-Content -Raw -Path '${SECRET_PATH}'; ` +
+      `$secure = ConvertTo-SecureString -String $enc; ` +
+      "$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure); " +
+      "[Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)",
+  ]);
+  return result.ok && result.stdout !== "" ? result.stdout : null;
+}
+
+/**
+ * DPAPI ties the ciphertext to this user and this machine — the same threat
+ * model as the macOS Keychain. The plaintext goes through a temp file rather
+ * than argv, same reasoning as `az.ts`'s `setSecret`.
+ */
+export async function writeSecret(
+  run: Runner,
+  value: string,
+): Promise<boolean> {
+  const dir = await mkdtemp(join(tmpdir(), "mangatracker-secret-"));
+  const file = join(dir, "value");
+  try {
+    await Bun.write(file, value);
+    const secretsDir = join(CONFIG_DIR, "secrets");
+    const result = await run([
+      "powershell",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$plain = Get-Content -Raw -Path '${file}'; ` +
+        `$secure = ConvertTo-SecureString -String $plain -AsPlainText -Force; ` +
+        `New-Item -ItemType Directory -Force -Path '${secretsDir}' | Out-Null; ` +
+        `ConvertFrom-SecureString -SecureString $secure | Set-Content -NoNewline -Path '${SECRET_PATH}'`,
+    ]);
+    return result.ok;
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Task Scheduler — launchd's equivalent
+// ---------------------------------------------------------------------------
+
+async function isRunning(run: Runner, name: string): Promise<boolean> {
+  const result = await run([
+    "schtasks",
+    "/Query",
+    "/TN",
+    name,
+    "/FO",
+    "LIST",
+    "/V",
+  ]);
+  return result.ok && /Status:\s*Running/i.test(result.stdout);
+}
+
+export interface ReloadOptions {
+  readonly name?: string;
+  /** How long to wait for the previous run to actually stop. */
+  readonly settleAttempts?: number;
+  readonly settleDelayMs?: number;
+  readonly runAttempts?: number;
+}
+
+/**
+ * A full stop/run, mirroring `macos.ts`'s bootout+bootstrap: `/End` followed
+ * by `/Run` always makes `bun --env-file=` reread `prod.env`. Unlike
+ * `kickstart -k` on macOS, there is no shortcut on this side that quietly
+ * keeps a stale credential — Task Scheduler has nothing analogous to launchd's
+ * in-memory cache to worry about.
+ */
+export async function reloadService(
+  run: Runner,
+  {
+    name = TASK_NAME,
+    settleAttempts = 20,
+    settleDelayMs = 250,
+    runAttempts = 3,
+  }: ReloadOptions = {},
+): Promise<void> {
+  // /End fails when the task is not running, which is a fine starting state.
+  await run(["schtasks", "/End", "/TN", name]);
+
+  for (let attempt = 0; attempt < settleAttempts; attempt++) {
+    if (!(await isRunning(run, name))) {
+      break;
+    }
+    await Bun.sleep(settleDelayMs);
+  }
+
+  let last = await run(["schtasks", "/Run", "/TN", name]);
+  for (let attempt = 1; attempt < runAttempts && !last.ok; attempt++) {
+    await Bun.sleep(settleDelayMs * 2);
+    last = await run(["schtasks", "/Run", "/TN", name]);
+  }
+
+  if (!last.ok) {
+    throw new Error(
+      `schtasks /Run failed after ${runAttempts} attempts: ` +
+        `${last.stderr || last.stdout}\n` +
+        `The service is now DOWN. Bring it back with:\n` +
+        `  schtasks /Run /TN ${name}`,
+    );
+  }
+}

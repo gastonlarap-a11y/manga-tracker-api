@@ -19,7 +19,7 @@ import {
   parseEnvFile,
   resolveSpec,
 } from "./lib/env";
-import { PLIST_PATH, readKeychain, readPlistEnv } from "./lib/macos";
+import { platform } from "./lib/platform";
 import { spawnRunner } from "./lib/run";
 import { heading, installErrorHandler, step, warn } from "./lib/ui";
 
@@ -42,25 +42,21 @@ for (const spec of ENV_MANIFEST) {
   if (spec.kind !== "secret") {
     continue;
   }
-  const fromPlist = await readPlistEnv(run, spec.name);
-  const fromKeychain = await readKeychain(run);
+  const fromConfig = await platform.readConfigEnv(run, spec.name);
+  const fromCache = await platform.readSecret(run);
   const lines: string[] = [
-    `plist     ${fromPlist === null ? "—" : digest(fromPlist)}`,
-    `keychain  ${fromKeychain === null ? "—" : digest(fromKeychain)}`,
+    `${platform.configLabel.padEnd(10)}${fromConfig === null ? "—" : digest(fromConfig)}`,
+    `${platform.secretCacheLabel.padEnd(10)}${fromCache === null ? "—" : digest(fromCache)}`,
   ];
-  if (
-    fromPlist !== null &&
-    fromKeychain !== null &&
-    fromPlist !== fromKeychain
-  ) {
-    // Worth shouting about: the cascade prefers the plist, so a stale Keychain
-    // is what a freshly wiped machine would silently recover.
+  if (fromConfig !== null && fromCache !== null && fromConfig !== fromCache) {
+    // Worth shouting about: the cascade prefers the config file, so a stale
+    // cache is what a freshly wiped machine would silently recover.
     lines.push(
-      "⚠ the plist and the Keychain disagree — run `bun run env:push`",
+      `⚠ the ${platform.configLabel} and ${platform.secretCacheLabel} disagree — run \`bun run env:push\``,
     );
   }
   secretReport.set(spec.name, lines);
-  const local = fromPlist ?? fromKeychain;
+  const local = fromConfig ?? fromCache;
   if (local !== null) {
     secrets.set(spec.secretName, local);
   }
@@ -145,14 +141,16 @@ const envMap: ReadonlyMap<string, string | null> = envPresent
   : new Map();
 report(".env", envPresent, "dev", envMap);
 
-const plistPresent = await Bun.file(PLIST_PATH).exists();
-const plistMap = new Map<string, string | null>();
-if (plistPresent) {
+const configPresent = await platform.configExists();
+const configMap = new Map<string, string | null>();
+if (configPresent) {
   for (const spec of ENV_MANIFEST) {
-    plistMap.set(spec.name, await readPlistEnv(run, spec.name));
+    configMap.set(spec.name, await platform.readConfigEnv(run, spec.name));
   }
 }
-report("plist", plistPresent, "prod", plistMap);
+report(platform.configLabel, configPresent, "prod", configMap);
 
 console.log(`\n  .env   ./.env`);
-console.log(`  plist  ${short(PLIST_PATH)}`);
+console.log(
+  `  ${platform.configLabel.padEnd(6)} ${short(platform.configPath)}`,
+);
