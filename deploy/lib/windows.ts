@@ -251,6 +251,19 @@ export interface InstallTaskOptions {
   readonly workingDirectory: string;
 }
 
+export interface InstallTaskOutcome {
+  /**
+   * False when the task registered but the permission grant did not take. The
+   * install is still usable — it just means the next `bun run deploy` may need
+   * an elevated terminal, which the caller reports rather than swallows.
+   */
+  readonly userCanControlIt: boolean;
+}
+
+/** Where Task Scheduler keeps a task's definition, and its permissions. */
+const taskFilePath = (name: string): string =>
+  join(process.env.SystemRoot ?? "C:\\Windows", "System32", "Tasks", name);
+
 /**
  * Registers the scheduled task, the one-time step a LaunchAgent gets by
  * copying its plist by hand. `/F` makes this idempotent: re-running the
@@ -266,13 +279,18 @@ export interface InstallTaskOptions {
  * `LastTaskResult 0xC000013A` (STATUS_CONTROL_C_EXIT) plus a trailing `^C` in
  * err.log means when you see it. S4U also keeps running while logged off.
  *
- * The `SecurityDescriptor` is explicit because registering S4U requires
- * elevation, and the descriptor Windows applies by default to a task created
- * from an elevated shell owns it as `BUILTIN\Administrators` and grants the
- * user read only — locking the account the task runs as out of the `/Run` and
- * `/End` in `reloadService`, and therefore out of every `bun run deploy`.
- * Granting `BU` (the local Users group) read+execute fixes that; the SDDL alias
- * avoids having to resolve the user's SID through another command.
+ * The `icacls` grant afterwards is the other half of that choice. Registering
+ * S4U requires elevation, and a task created from an elevated shell is owned by
+ * `BUILTIN\Administrators` with the invoking user granted read only — which
+ * locks the account the task runs as out of the `/Run` and `/End` in
+ * `reloadService`, and therefore out of every `bun run deploy`. Task Scheduler
+ * keeps a task's permissions in the ACL of its file under `System32\Tasks`, so
+ * granting the user read+execute there is what makes the deploy work unelevated.
+ *
+ * It is done with `icacls` rather than the `<SecurityDescriptor>` element the
+ * task XML schema defines, because `schtasks /Create /XML` silently ignores
+ * that element — verified on Windows 11: the registered task came back with an
+ * inherited `D:AI(...)` DACL instead of the `D:P` the XML asked for.
  *
  * `ExecutionTimeLimit` is `PT0S` (unlimited) on purpose — Task Scheduler's
  * default kills a task after 72 hours, which a backend meant to run
@@ -281,13 +299,12 @@ export interface InstallTaskOptions {
 export async function installTask(
   run: Runner,
   { name = TASK_NAME, bunPath, workingDirectory }: InstallTaskOptions,
-): Promise<void> {
+): Promise<InstallTaskOutcome> {
   const user = `${process.env.COMPUTERNAME ?? ""}\\${userInfo().username}`;
   const xml = `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>Manga Tracker backend (Bun + Hono), started at logon and kept alive.</Description>
-    <SecurityDescriptor>D:P(A;;FA;;;BA)(A;;FA;;;SY)(A;;FRFX;;;BU)</SecurityDescriptor>
   </RegistrationInfo>
   <Triggers>
     <LogonTrigger>
@@ -346,11 +363,21 @@ export async function installTask(
       throw new Error(
         `schtasks /Create failed: ${result.stderr || result.stdout}\n` +
           `If this is a permissions error, a task named ${name} from an older ` +
-          `elevated install is in the way. Remove it once, from an elevated ` +
-          `terminal on the same account, then re-run this unelevated:\n` +
+          `install is in the way and belongs to another account. Remove it once ` +
+          `and re-run:\n` +
           `  schtasks /Delete /TN ${name} /F`,
       );
     }
+
+    // Read+execute is exactly what /Run and /End need — no write, so the user
+    // still cannot redefine the task without elevating.
+    const granted = await run([
+      "icacls",
+      taskFilePath(name),
+      "/grant",
+      `${userInfo().username}:(RX)`,
+    ]);
+    return { userCanControlIt: granted.ok };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

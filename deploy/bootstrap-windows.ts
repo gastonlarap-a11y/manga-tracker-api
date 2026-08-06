@@ -107,8 +107,20 @@ if (await platform.configExists()) {
 // --- 4. register the scheduled task -----------------------------------------
 
 heading("Registering the scheduled task…");
-await installTask(run, { bunPath, workingDirectory: repoRoot });
+const { userCanControlIt } = await installTask(run, {
+  bunPath,
+  workingDirectory: repoRoot,
+});
 done(`Task "${platform.serviceLabel}" registered.`);
+if (!userCanControlIt) {
+  // Not fatal — the backend will run. But `bun run deploy` reloads the task,
+  // and without this grant that reload needs an elevated terminal every time.
+  warn(
+    "could not grant your account control of the task. Deploys will need an " +
+      "elevated terminal until you run:\n" +
+      `  icacls "%SystemRoot%\\System32\\Tasks\\${platform.serviceLabel}" /grant "%USERNAME%:(RX)"`,
+  );
+}
 
 // --- 5. the generated Prisma client the checks in deploy.ts type against ------
 
