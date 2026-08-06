@@ -1,0 +1,3 @@
+# Biome's formatter enforces LF, so a CRLF working tree fails `bun run lint` on
+# every file in the repo. This overrides core.autocrlf on Windows checkouts.
+* text=auto eol=lf
