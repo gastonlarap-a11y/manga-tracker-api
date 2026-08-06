@@ -32,7 +32,7 @@ bun run db:migrate
 |---|---|---|
 | `DATABASE_URL` | yes | SQLite file location — the source of truth |
 | `PORT` | no (5150) | Port the API listens on, always bound to `127.0.0.1` |
-| `MONGODB_URL` | no | Azure DocumentDB connection string. **Unset means the replica is off** and the app behaves exactly as it did before it existed |
+| `MONGODB_URL` | no | Azure DocumentDB connection string, in direct `mongodb://host:10260/?tls=true&…` form — **not** `mongodb+srv://` (Bun on Windows returns `["127.0.0.1"]` from `dns.getServers()`, so every SRV lookup fails). **Unset means the replica is off** and the app behaves exactly as it did before it existed |
 | `MONGODB_DB` | no (`mangatracker`) | Database name inside the cluster |
 
 Production and development share this checkout, so they are kept apart by database name: the

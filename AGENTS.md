@@ -50,6 +50,10 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - Handlers in `*.routes.ts` only validate and map responses; business logic lives in the
   module's `*.service.ts`.
 - Never edit `src/generated/**`; never commit `.env*` or `*.db` files.
+- `.gitattributes` pins the working tree to LF on every platform. Biome's formatter enforces
+  LF, so a CRLF checkout on Windows (`core.autocrlf=true`) fails `bun run lint` on every file
+  in the repo — it reports 67 errors that are not lint errors at all. Never relax the rule to
+  `crlf`: that would fail the same way on macOS and in CI.
 - `mongodb` is pinned to `^6`: the 7.x line ships `bson@7`, which calls `node:v8`
   `isBuildingSnapshot` at import time and crashes under Bun. Do not bump it without re-running
   the connectivity check.
@@ -60,6 +64,21 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   and deploy all derive their behaviour from that classification. There is deliberately no
   per-environment file tree: Bun only auto-loads `.env`, `.env.<NODE_ENV>` and `.env.local` from
   the cwd, and `.gitignore` covers `.env*` but would not cover a nested `env/` directory.
+- The Windows scheduled task is `LogonType=S4U` **plus an `icacls` grant afterwards**, and both
+  halves matter. `InteractiveToken` runs it in the user's session, where the `cmd.exe` wrapper
+  opens a visible console window — closing it kills the backend (`LastTaskResult 0xC000013A` +
+  a trailing `^C` in err.log). S4U runs in session 0, with no console at all. But S4U needs
+  elevation to register, and the task is then owned by `Administrators` with the user on
+  read-only, locking that user out of the `/Run` and `/End` in `reloadService`. The grant must go
+  through `icacls` on the task's file in `System32\Tasks`: `schtasks /Create /XML` **silently
+  ignores** the `<SecurityDescriptor>` element the schema defines (verified — the registered task
+  came back with an inherited `D:AI(...)` DACL). Consequence: `bun run setup:windows` needs an
+  elevated terminal once; nothing else does.
+- `MONGODB_URL` is stored in direct form (`mongodb://host:10260/?tls=true&…`), never
+  `mongodb+srv://`. Bun on Windows does not read the system DNS servers — `dns.getServers()`
+  returns `["127.0.0.1"]` — so every SRV lookup fails with `querySrv ECONNREFUSED` and sync never
+  connects, while the OS resolver answers fine. The direct form skips the SRV lookup entirely;
+  `tls=true` is spelled out because only `mongodb+srv` implies it.
 - Reloading launchd is bootout → **wait until the job is gone** → bootstrap. `bootout` returns
   before the teardown finishes, and bootstrapping into a domain that still holds the dying job
   fails with `Bootstrap failed: 5: Input/output error` and leaves production down.
@@ -105,6 +124,10 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 ## Engineering standards
 - Every feature ships with its tests. Run `bun run lint` + `bun run typecheck` + `bun test`
   before declaring work done; report real results.
+- The suite must pass on macOS, Windows and Linux (CI) — `bun run deploy` gates on it on every
+  machine. A test never inherits the host: anything reading `process.platform` or
+  `process.getuid` takes it as a parameter (see `PlatformAdapter.os` and `ReloadOptions.uid`)
+  so the test pins it, exactly like `Runner` pins the commands.
 - Handle errors explicitly at boundaries: route handlers translate failures into HTTP
   responses; services never swallow exceptions.
 - No speculative abstractions: introduce a pattern only for a problem this repo has, and say

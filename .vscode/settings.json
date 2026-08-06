@@ -5,6 +5,7 @@
   "js/ts.preferences.importModuleSpecifierEnding": "minimal",
 
   // --- FORMATEO Y AUTO-FIX (BIOME + PRISMA) ---
+  "files.eol": "\n", // Biome formatea a LF; sin esto VS Code crea archivos CRLF en Windows
   "editor.formatOnSave": true,
   "editor.codeActionsOnSave": {
     "source.fixAll.biome": "explicit",

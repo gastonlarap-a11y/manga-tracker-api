@@ -2,8 +2,17 @@ import { describe, expect, it } from "bun:test";
 import { reloadService } from "./macos";
 import { createFakeRunner, type FakeResponse } from "./run";
 
-/** Timings collapsed so the tests do not actually sleep. */
-const FAST = { settleAttempts: 5, settleDelayMs: 0, bootstrapAttempts: 3 };
+/**
+ * Timings collapsed so the tests do not actually sleep, and a fixed uid so the
+ * launchd domain does not depend on the host: `process.getuid` is undefined on
+ * Windows, where `bun run deploy` still gates on this suite.
+ */
+const FAST = {
+  settleAttempts: 5,
+  settleDelayMs: 0,
+  bootstrapAttempts: 3,
+  uid: 501,
+};
 
 const EIO = "Bootstrap failed: 5: Input/output error";
 

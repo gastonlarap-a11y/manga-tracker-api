@@ -102,8 +102,14 @@ export async function writeConfigEnv(
  * `Microsoft.PowerShell.Security` ships with every Windows install, so this
  * needs nothing installed, unlike the `CredentialManager` module.
  */
-export async function readSecret(run: Runner): Promise<string | null> {
-  if (!(await Bun.file(SECRET_PATH).exists())) {
+export async function readSecret(
+  run: Runner,
+  // Overridable for the same reason `readConfigEnv` takes its path: a test that
+  // reads the real cache passes or fails depending on whether this machine
+  // happens to have been bootstrapped.
+  path = SECRET_PATH,
+): Promise<string | null> {
+  if (!(await Bun.file(path).exists())) {
     return null;
   }
   const result = await run([
@@ -111,7 +117,7 @@ export async function readSecret(run: Runner): Promise<string | null> {
     "-NoProfile",
     "-NonInteractive",
     "-Command",
-    `$enc = Get-Content -Raw -Path '${SECRET_PATH}'; ` +
+    `$enc = Get-Content -Raw -Path '${path}'; ` +
       `$secure = ConvertTo-SecureString -String $enc; ` +
       "$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure); " +
       "[Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)",
@@ -151,6 +157,30 @@ export async function writeSecret(
 // ---------------------------------------------------------------------------
 // Task Scheduler — launchd's equivalent
 // ---------------------------------------------------------------------------
+
+/**
+ * Whether this process is running elevated. `installTask` registers an S4U
+ * task, which Windows refuses to create without administrator rights, and
+ * discovering that only once the bootstrap has already provisioned a Key Vault
+ * over the network is a bad way to find out.
+ *
+ * The check goes through PowerShell rather than probing a privileged command,
+ * because it answers the literal `True`/`False` regardless of the system
+ * language — the localized "Acceso denegado" from `schtasks` is exactly the
+ * kind of string this must not depend on.
+ */
+export async function isElevated(run: Runner): Promise<boolean> {
+  const result = await run([
+    "powershell",
+    "-NoProfile",
+    "-NonInteractive",
+    "-Command",
+    "[Security.Principal.WindowsPrincipal]::new(" +
+      "[Security.Principal.WindowsIdentity]::GetCurrent()" +
+      ").IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)",
+  ]);
+  return result.ok && result.stdout.trim() === "True";
+}
 
 async function isRunning(run: Runner, name: string): Promise<boolean> {
   const result = await run([
@@ -221,20 +251,55 @@ export interface InstallTaskOptions {
   readonly workingDirectory: string;
 }
 
+export interface InstallTaskOutcome {
+  /**
+   * False when the task registered but the permission grant did not take. The
+   * install is still usable — it just means the next `bun run deploy` may need
+   * an elevated terminal, which the caller reports rather than swallows.
+   */
+  readonly userCanControlIt: boolean;
+}
+
+/** Where Task Scheduler keeps a task's definition, and its permissions. */
+const taskFilePath = (name: string): string =>
+  join(process.env.SystemRoot ?? "C:\\Windows", "System32", "Tasks", name);
+
 /**
  * Registers the scheduled task, the one-time step a LaunchAgent gets by
  * copying its plist by hand. `/F` makes this idempotent: re-running the
  * bootstrap overwrites rather than fails on an already-registered task.
  *
+ * Two settings here each cost a broken install to get right, so both reasons are
+ * written down:
+ *
+ * `LogonType` is `S4U`, NOT `InteractiveToken`. S4U runs the task in session 0,
+ * where it has no console at all. `InteractiveToken` runs it in the user's
+ * session, and the `cmd.exe` wrapper below then opens a visible console window
+ * on the desktop — closing that stray window kills the backend, which is what
+ * `LastTaskResult 0xC000013A` (STATUS_CONTROL_C_EXIT) plus a trailing `^C` in
+ * err.log means when you see it. S4U also keeps running while logged off.
+ *
+ * The `icacls` grant afterwards is the other half of that choice. Registering
+ * S4U requires elevation, and a task created from an elevated shell is owned by
+ * `BUILTIN\Administrators` with the invoking user granted read only — which
+ * locks the account the task runs as out of the `/Run` and `/End` in
+ * `reloadService`, and therefore out of every `bun run deploy`. Task Scheduler
+ * keeps a task's permissions in the ACL of its file under `System32\Tasks`, so
+ * granting the user read+execute there is what makes the deploy work unelevated.
+ *
+ * It is done with `icacls` rather than the `<SecurityDescriptor>` element the
+ * task XML schema defines, because `schtasks /Create /XML` silently ignores
+ * that element — verified on Windows 11: the registered task came back with an
+ * inherited `D:AI(...)` DACL instead of the `D:P` the XML asked for.
+ *
  * `ExecutionTimeLimit` is `PT0S` (unlimited) on purpose — Task Scheduler's
  * default kills a task after 72 hours, which a backend meant to run
- * indefinitely cannot have. `LogonType` is `S4U` so the task survives a
- * locked screen without storing the user's password.
+ * indefinitely cannot have.
  */
 export async function installTask(
   run: Runner,
   { name = TASK_NAME, bunPath, workingDirectory }: InstallTaskOptions,
-): Promise<void> {
+): Promise<InstallTaskOutcome> {
   const user = `${process.env.COMPUTERNAME ?? ""}\\${userInfo().username}`;
   const xml = `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
@@ -289,10 +354,30 @@ export async function installTask(
       "/F",
     ]);
     if (!result.ok) {
+      // The remedy is unconditional rather than gated on matching the error
+      // text: Windows localizes it (this one answers "Acceso denegado"), so a
+      // regex over "access is denied" would miss the exact machine that needs
+      // the hint. A denied /Create almost always means a task left over from an
+      // earlier elevated run, which belongs to Administrators and cannot be
+      // overwritten by the user it runs as.
       throw new Error(
-        `schtasks /Create failed: ${result.stderr || result.stdout}`,
+        `schtasks /Create failed: ${result.stderr || result.stdout}\n` +
+          `If this is a permissions error, a task named ${name} from an older ` +
+          `install is in the way and belongs to another account. Remove it once ` +
+          `and re-run:\n` +
+          `  schtasks /Delete /TN ${name} /F`,
       );
     }
+
+    // Read+execute is exactly what /Run and /End need — no write, so the user
+    // still cannot redefine the task without elevating.
+    const granted = await run([
+      "icacls",
+      taskFilePath(name),
+      "/grant",
+      `${userInfo().username}:(RX)`,
+    ]);
+    return { userCanControlIt: granted.ok };
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
