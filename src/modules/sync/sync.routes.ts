@@ -13,6 +13,7 @@ const movedSchema = z.object({
   events: z.number(),
   adapters: z.number(),
   covers: z.number(),
+  dismissals: z.number().describe("Rejected duplicate pairs"),
 });
 
 const syncResultSchema = z
@@ -172,6 +173,7 @@ export const syncRoutes = new OpenAPIHono({ defaultHook })
           events: outcome.events,
           adapters: outcome.adapters,
           covers: outcome.covers,
+          dismissals: outcome.dismissals,
         },
         200,
       );

@@ -19,6 +19,9 @@ export const mangaSchema = z
     status: mangaStatusSchema,
     tags: z.array(z.string()),
     createdAt: z.iso.datetime(),
+    // Non-null means this manga was merged into another one and no longer owns
+    // a card of its own; the value is the canonical's normalizedSlug.
+    mergedIntoSlug: z.string().nullable(),
   })
   .openapi("Manga");
 export type MangaDto = z.infer<typeof mangaSchema>;
@@ -66,6 +69,7 @@ export function toMangaDto(manga: {
   status: string;
   tags: string;
   createdAt: Date;
+  mergedIntoSlug: string | null;
 }): MangaDto {
   return {
     id: manga.id,
@@ -77,6 +81,7 @@ export function toMangaDto(manga: {
     status: statusFromDb(manga.status),
     tags: tagsFromJson(manga.tags),
     createdAt: manga.createdAt.toISOString(),
+    mergedIntoSlug: manga.mergedIntoSlug,
   };
 }
 

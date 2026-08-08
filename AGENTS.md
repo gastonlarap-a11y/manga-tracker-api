@@ -23,8 +23,8 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   wraps `icacls`/`powershell`/`schtasks` — selected at runtime by `platform.ts`, which the four
   top-level scripts and `secrets.ts` depend on instead of importing either directly), and
   `azure.json` — committed, non-secret, names the resource group and vault
-- `src/lib/` — pure shared utilities (normalization, chapter parsing, title similarity,
-  shared Zod schemas + error hook) with colocated tests
+- `src/lib/` — pure shared utilities (normalization, chapter parsing, series keys, title
+  similarity, merge-group resolution, shared Zod schemas + error hook) with colocated tests
 - `src/generated/prisma/` — generated Prisma client (never edit; gitignored)
 - `prisma/schema.prisma` — data model; migrations live in `prisma/migrations/`
 - `public/` — dashboard static build (gitignored), deployed from the sibling
@@ -94,6 +94,35 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - Reading progress is stored as append-only events; current state is derived by projection —
   event rows are never UPDATEd or DELETEd. The only report that does not append: a chapter
   already present in the manga's history (re-reads/reloads) returns its existing event.
+- **A card is a GROUP of mangas, not a row.** One series read on two sites under two different
+  titles produces two `Manga` rows; merging them sets `mergedIntoSlug` on the absorbed one,
+  which turns it into an *alias*: it stops projecting a card of its own and its events are read
+  as part of the canonical's history. **No `ReadingEvent` is ever moved** — that is what makes
+  merging compatible with the append-only rule, and what makes unmerge a lossless undo.
+  - Anything that reads or writes a card goes through the group: `resolveMangaGroups`
+    (`src/lib/manga-groups.ts`, pure) is the single implementation, shared by library, events
+    and duplicates. It tolerates a pointer to a slug this machine has not synced yet (treated as
+    canonical) and a cycle (both treated as canonical) — a request can never hang on it.
+  - Chapters are deduplicated across the group with `chapterKey` (`src/lib/normalize.ts`), the
+    same identity the ingestion uses, so a chapter read on both sites is listed once and
+    `readCount` counts chapters, not rows.
+  - Merge chains are flattened on write: `A→B→C` is never persisted.
+- Duplicate detection is `titleSimilarity` (`src/lib/similarity.ts`): fuzzy token pairing
+  weighted by word length, with whole-string edit distance as a floor. Plain Levenshtein over
+  slugs was not enough — two sites translating one Japanese title differently score 0.79 as
+  whole strings and 0.96 by tokens. Leftover words that name a season or a spin-off raise
+  `sequelSuspicion`, which blocks automatic merging (never the suggestion).
+  - `AUTO_MERGE_SCORE` (0.92) is what the ingestion merges without asking; `SUGGEST_SCORE`
+    (0.75) is what `/duplicates` lists. Both live in `lib` because the ingestion needs them and
+    modules never import each other.
+  - `DuplicateDismissal` is the mandatory counterpart of the lower suggestion threshold: without
+    a way to reject a pair, a false positive returns on every load.
+  - There is deliberately **no external catalogue lookup** (MangaDex/AniList) for multi-language
+    aliases: it would trade `no cloud dependencies` for a guess. Titles no local heuristic can
+    relate are joined by hand from the dashboard (`POST /api/duplicates/merge` accepts any pair).
+- Within one site, `ReadingEvent.seriesKey` (host + path of the series page, derived by the
+  server from the extension's `seriesUrl`) outranks the title: a site that reformats its
+  `<title>` cannot split a series it already tracks into a second manga.
 - One module = one vertical slice under `src/modules/<name>/` (routes + service + tests
   together).
 - Dependency direction: `src/index.ts` → `src/modules/*` → `src/db` / `src/config` / `src/lib`;
@@ -115,6 +144,12 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
     applying a peer's document would restamp it and the two machines would trade it forever.
   - Deletion is `Manga.deletedAt`, a value that converges like any other field. Queries that
     show mangas must filter it.
+  - `Manga.mergedIntoSlug` converges last-write-wins like every other field, and is stored as a
+    **slug** for the same reason documents are: a local uuid means nothing to a peer. A pointer
+    to a slug that has not arrived yet is kept as written and resolves on the next pass — never
+    cleared, or the two machines would strip each other's merge forever.
+  - `DuplicateDismissal` is a set union keyed by the ordered slug pair, exactly like
+    `ReadingEvent`: nothing is ever removed for being absent on one side.
   - Documents are keyed by natural keys (`normalizedSlug`, `domain`), not by the local uuid, so
     two machines that discover the same title separately merge instead of colliding on the
     unique slug index.

@@ -49,12 +49,14 @@ const peerManga = (over: Partial<MangaDoc> = {}): MangaDoc => ({
   createdAt: new Date("2026-01-05T00:00:00.000Z"),
   updatedAt: new Date("2026-01-05T00:00:00.000Z"),
   deletedAt: null,
+  mergedIntoSlug: null,
   ...over,
 });
 
 const peerEvent = (over: Partial<ReadingEventDoc> = {}): ReadingEventDoc => ({
   _id: "peer-event-1",
   mangaSlug: "solo-leveling",
+  seriesKey: null,
   chapterLabel: "Cap. 179",
   chapterNumber: 179,
   sourceUrl: "https://olympusxyz.com/sl/179",
@@ -64,6 +66,7 @@ const peerEvent = (over: Partial<ReadingEventDoc> = {}): ReadingEventDoc => ({
 });
 
 beforeEach(async () => {
+  await prisma.duplicateDismissal.deleteMany();
   await prisma.manga.deleteMany();
   await prisma.siteAdapter.deleteMany();
 });
@@ -160,6 +163,7 @@ describe("Sync: events converge as a union", () => {
       events: 0,
       adapters: 0,
       covers: 0,
+      dismissals: 0,
     });
     expect(second.pushed.events).toBe(0);
     expect(second.pushed.mangas).toBe(0);
@@ -382,5 +386,136 @@ describe("Sync: restore", () => {
     expect(after.pulled.events).toBe(0);
     expect(after.pushed.events).toBe(0);
     expect(await prisma.readingEvent.count()).toBe(1);
+  });
+});
+
+describe("Sync: a merge decided on one machine reaches the others", () => {
+  const DRAGON_A = "callate-dragona-malvada-ya-no-quiero-criar-hijos-contigo";
+  const DRAGON_B = "callate-malvado-dragon-ya-no-quiero-criar-hijos-contigo";
+
+  it("pushes the merge pointer as a plain field", async () => {
+    const target = createFakeTarget();
+    const canonical = await prisma.manga.create({
+      data: { canonicalName: "Dragona", normalizedSlug: DRAGON_A },
+    });
+    await prisma.manga.create({
+      data: {
+        canonicalName: "Dragón",
+        normalizedSlug: DRAGON_B,
+        mergedIntoSlug: canonical.normalizedSlug,
+      },
+    });
+
+    await sync(target);
+
+    expect(target.mangas.get(DRAGON_B)?.mergedIntoSlug).toBe(DRAGON_A);
+    expect(target.mangas.get(DRAGON_A)?.mergedIntoSlug).toBeNull();
+  });
+
+  it("applies a peer's merge, and lets a newer local unmerge win it back", async () => {
+    const target = createFakeTarget();
+    await prisma.manga.create({
+      data: {
+        canonicalName: "Dragón",
+        normalizedSlug: DRAGON_B,
+        updatedAt: new Date("2026-01-01T00:00:00.000Z"),
+      },
+    });
+    target.mangas.set(
+      DRAGON_B,
+      peerManga({
+        _id: DRAGON_B,
+        canonicalName: "Dragón",
+        mergedIntoSlug: DRAGON_A,
+        updatedAt: new Date("2026-02-01T00:00:00.000Z"),
+      }),
+    );
+
+    await sync(target);
+    expect(
+      (
+        await prisma.manga.findUniqueOrThrow({
+          where: { normalizedSlug: DRAGON_B },
+        })
+      ).mergedIntoSlug,
+    ).toBe(DRAGON_A);
+
+    // Undoing the merge here is just another edit, and the newer clock wins.
+    await prisma.manga.update({
+      where: { normalizedSlug: DRAGON_B },
+      data: {
+        mergedIntoSlug: null,
+        updatedAt: new Date("2026-03-01T00:00:00.000Z"),
+      },
+    });
+    await sync(target);
+    expect(target.mangas.get(DRAGON_B)?.mergedIntoSlug).toBeNull();
+  });
+
+  it("keeps a pointer to a manga that has not arrived yet", async () => {
+    // Halfway-synced machine: the alias landed before its canonical. Clearing
+    // the value here would make the two machines strip each other's merge
+    // forever, so it is stored as written and resolves on the next pass.
+    const target = createFakeTarget();
+    target.mangas.set(
+      DRAGON_B,
+      peerManga({
+        _id: DRAGON_B,
+        canonicalName: "Dragón",
+        mergedIntoSlug: DRAGON_A,
+      }),
+    );
+
+    await sync(target);
+
+    expect(
+      (
+        await prisma.manga.findUniqueOrThrow({
+          where: { normalizedSlug: DRAGON_B },
+        })
+      ).mergedIntoSlug,
+    ).toBe(DRAGON_A);
+  });
+});
+
+describe("Sync: rejected duplicate pairs converge as a union", () => {
+  it("pulls a peer's dismissal and pushes its own, without ever removing one", async () => {
+    const target = createFakeTarget();
+    await prisma.duplicateDismissal.create({
+      data: { slugA: "berserk", slugB: "berserk-gaiden" },
+    });
+    target.dismissals.set("one-piece|one-punch-man", {
+      _id: "one-piece|one-punch-man",
+      slugA: "one-piece",
+      slugB: "one-punch-man",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const result = await sync(target);
+
+    expect(result.pulled.dismissals).toBe(1);
+    expect(result.pushed.dismissals).toBe(1);
+    expect(await prisma.duplicateDismissal.count()).toBe(2);
+    expect(target.dismissals.size).toBe(2);
+
+    // A pair absent on one side is never taken as "un-dismissed".
+    const second = await sync(target);
+    expect(second.pulled.dismissals).toBe(0);
+    expect(second.pushed.dismissals).toBe(0);
+    expect(await prisma.duplicateDismissal.count()).toBe(2);
+  });
+
+  it("skips a malformed document instead of failing the sync", async () => {
+    const target = createFakeTarget();
+    target.dismissals.set("broken", {
+      _id: "broken",
+      slugA: "",
+      slugB: "one-piece",
+      createdAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+
+    const result = await sync(target);
+    expect(result.pulled.dismissals).toBe(0);
+    expect(await prisma.duplicateDismissal.count()).toBe(0);
   });
 });

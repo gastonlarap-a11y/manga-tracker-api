@@ -695,3 +695,177 @@ describe("DELETE /mangas/{id}", () => {
     expect(res.status).toBe(404);
   });
 });
+
+// The series that used to occupy two cards: same manga, two sites, two titles.
+describe("merged mangas project as one card", () => {
+  async function seedMergedPair() {
+    const canonical = await seedManga(
+      "callate-dragona-malvada-ya-no-quiero-criar-hijos-contigo",
+      "Callate dragona malvada, ya no quiero criar hijos contigo",
+      [
+        {
+          label: "Cap. 1",
+          number: 1,
+          domain: "sitio-a.com",
+          readAt: "2026-07-01T10:00:00.000Z",
+        },
+        {
+          label: "Cap. 2",
+          number: 2,
+          domain: "sitio-a.com",
+          readAt: "2026-07-02T10:00:00.000Z",
+        },
+      ],
+    );
+    const alias = await seedManga(
+      "callate-malvado-dragon-ya-no-quiero-criar-hijos-contigo",
+      "Cállate, malvado dragón, ya no quiero criar hijos contigo",
+      [
+        // Chapter 2 again, on the other site: the same chapter, not a new one.
+        {
+          label: "Capítulo 2",
+          number: 2,
+          domain: "sitio-b.com",
+          readAt: "2026-07-03T10:00:00.000Z",
+        },
+        {
+          label: "Capítulo 3",
+          number: 3,
+          domain: "sitio-b.com",
+          readAt: "2026-07-04T10:00:00.000Z",
+        },
+      ],
+    );
+    await prisma.manga.update({
+      where: { id: alias.id },
+      data: { mergedIntoSlug: canonical.normalizedSlug },
+    });
+    return { canonical, alias };
+  }
+
+  it("lists one entry that carries both sites and the combined progress", async () => {
+    const { canonical } = await seedMergedPair();
+
+    const entries = libraryResponseSchema.parse(
+      await (await libraryRoutes.request("/library")).json(),
+    );
+
+    expect(entries).toHaveLength(1);
+    const entry = entries[0];
+    expect(entry.id).toBe(canonical.id);
+    expect(entry.aliasCount).toBe(1);
+    expect(entry.reachedChapter).toEqual({ number: 3, label: "Capítulo 3" });
+    expect(entry.sourceDomains.toSorted()).toEqual([
+      "sitio-a.com",
+      "sitio-b.com",
+    ]);
+    // Four events, three distinct chapters: chapter 2 was read on both sites.
+    expect(entry.readCount).toBe(3);
+    // Keep reading where the last reading happened, which is the other site.
+    expect(entry.lastSourceUrl).toContain("sitio-b.com");
+  });
+
+  it("matches a domain filter against the alias's readings too", async () => {
+    await seedMergedPair();
+
+    const entries = libraryResponseSchema.parse(
+      await (await libraryRoutes.request("/library?domain=sitio-b.com")).json(),
+    );
+    // A SQL `where` on the manga row would have returned nothing here: the
+    // canonical has no event on sitio-b.com, its alias does.
+    expect(entries).toHaveLength(1);
+    expect(entries[0].normalizedSlug).toContain("dragona-malvada");
+  });
+
+  it("shows each chapter once in the history, saying where else it was read", async () => {
+    const { canonical } = await seedMergedPair();
+
+    const history = mangaHistorySchema.parse(
+      await (
+        await libraryRoutes.request(`/mangas/${canonical.id}/history`)
+      ).json(),
+    );
+
+    expect(history.events.map((event) => event.chapterNumber)).toEqual([
+      3, 2, 1,
+    ]);
+    const chapterTwo = history.events.find(
+      (event) => event.chapterNumber === 2,
+    );
+    // The first reading is the one kept; the other site is recorded on it.
+    expect(chapterTwo?.sourceDomain).toBe("sitio-a.com");
+    expect(chapterTwo?.alsoReadOn).toEqual(["sitio-b.com"]);
+  });
+
+  it("serves the alias's id as the same card, so old links keep working", async () => {
+    const { canonical, alias } = await seedMergedPair();
+
+    const history = mangaHistorySchema.parse(
+      await (await libraryRoutes.request(`/mangas/${alias.id}/history`)).json(),
+    );
+    expect(history.manga.id).toBe(canonical.id);
+  });
+
+  it("lists the merged-in mangas so the merge can be undone", async () => {
+    const { canonical, alias } = await seedMergedPair();
+
+    const history = mangaHistorySchema.parse(
+      await (
+        await libraryRoutes.request(`/mangas/${canonical.id}/history`)
+      ).json(),
+    );
+    expect(history.aliases.map((entry) => entry.id)).toEqual([alias.id]);
+  });
+
+  it("edits the card even when the alias's id is used", async () => {
+    const { canonical, alias } = await seedMergedPair();
+
+    const res = await libraryRoutes.request(`/mangas/${alias.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "completed" }),
+    });
+
+    expect(mangaSchema.parse(await res.json()).id).toBe(canonical.id);
+    expect(
+      (await prisma.manga.findUniqueOrThrow({ where: { id: canonical.id } }))
+        .status,
+    ).toBe("completed");
+  });
+
+  it("deletes the whole group, so the other site cannot resurrect the card", async () => {
+    const { canonical, alias } = await seedMergedPair();
+
+    const res = await libraryRoutes.request(`/mangas/${canonical.id}`, {
+      method: "DELETE",
+    });
+    expect(res.status).toBe(204);
+
+    const rows = await prisma.manga.findMany({
+      where: { id: { in: [canonical.id, alias.id] } },
+    });
+    expect(rows.every((row) => row.deletedAt !== null)).toBe(true);
+    expect(
+      libraryResponseSchema.parse(
+        await (await libraryRoutes.request("/library")).json(),
+      ),
+    ).toEqual([]);
+    // Append-only: a delete never touches the log.
+    expect(await prisma.readingEvent.count()).toBe(4);
+  });
+
+  it("keeps an alias's readings after the alias itself was deleted", async () => {
+    const { canonical, alias } = await seedMergedPair();
+    await prisma.manga.update({
+      where: { id: alias.id },
+      data: { deletedAt: new Date() },
+    });
+
+    const entries = libraryResponseSchema.parse(
+      await (await libraryRoutes.request("/library")).json(),
+    );
+    expect(entries).toHaveLength(1);
+    expect(entries[0].id).toBe(canonical.id);
+    expect(entries[0].reachedChapter?.number).toBe(3);
+  });
+});
