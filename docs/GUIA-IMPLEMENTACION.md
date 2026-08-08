@@ -212,22 +212,70 @@ dominio que no guardaste debe dar "no encontrado".
 
 ---
 
-### Paso 6 — Módulo `duplicates`: detectar mangas repetidos (solo sugerir)
+### Paso 6 — Módulo `duplicates`: detectar y unir mangas repetidos
 
-A veces el mismo manga queda registrado dos veces con nombres apenas distintos. Este módulo
-**solo detecta y sugiere**; no fusiona nada automáticamente.
+El mismo manga leído en dos sitios llega con dos títulos distintos (cada sitio lo traduce a su
+manera), así que se registra dos veces y aparecen dos tarjetas. Este módulo detecta esos pares y
+permite unirlos en una sola tarjeta.
 
-- **`GET /api/duplicates`** — devuelve pares de mangas cuyos nombres normalizados son muy parecidos
-  (parecido alto, del orden del 85% o más). Es una lista de sugerencias del tipo "¿estos dos son el
-  mismo?". La corrección se hace a mano corrigiendo el nombre (Paso 4).
+#### Cómo se detecta
 
-> **Por qué no hay "fusión automática" todavía:** fusionar implicaría mover eventos de un manga a
-> otro, y eso contradice la regla de que los eventos nunca se modifican. Por ahora se deja solo la
-> detección; si más adelante hace falta fusionar de verdad, se diseñará respetando esa regla (por
-> ejemplo con una tabla de "alias" en vez de mover eventos).
+Comparar los slugs completos con distancia de edición no alcanza, y no es un caso hipotético:
 
-**Cómo probar:** cargar dos mangas con nombres casi iguales y confirmar que aparecen como par
-sugerido.
+| Sitio | Slug |
+|---|---|
+| A | `callate-dragona-malvada-ya-no-quiero-criar-hijos-contigo` |
+| B | `callate-malvado-dragon-ya-no-quiero-criar-hijos-contigo` |
+
+Como cadenas completas se parecen un **0.79** (dos palabras reordenadas y flexionadas son un
+montón de ediciones dentro de 56 caracteres), pero son el mismo manga. `titleSimilarity`
+(`src/lib/similarity.ts`) los compara **palabra por palabra**, emparejando de forma difusa
+(`dragona`↔`dragon` = 0.86, `malvada`↔`malvado` = 0.86) y ponderando por longitud, y da **0.96**.
+La distancia de edición sobre la cadena entera se conserva como piso, porque gana cuando el error
+es una letra dentro de una sola palabra larga (`solo-leveling` vs `solo-levelling`).
+
+Dos umbrales:
+
+- **0.92 — unión automática.** Al registrar una lectura de un título nuevo, si se parece tanto a
+  algo que ya está en la biblioteca, la segunda tarjeta ni siquiera llega a existir.
+- **0.75 — sugerencia.** Aparece en `GET /api/duplicates` para que decidas vos.
+
+Con una salvaguarda: si las palabras que sobran nombran una temporada o un spin-off (`season`,
+`parte`, `ii`, un número suelto…), el par se marca con `sequelSuspicion` y **nunca** se une solo.
+`Dr. Stone` y `Dr. Stone 2` puntúan 0.93 y aun así se te preguntan.
+
+También se detecta por **portada compartida**: dos mangas con la misma `coverUrl` son el mismo,
+por distintos que sean los títulos.
+
+#### Cómo se unen (sin romper el append-only)
+
+Fusionar **no mueve ningún evento**. El manga absorbido recibe `mergedIntoSlug` con el slug del
+que sobrevive, y con eso deja de tener tarjeta propia: sus eventos se leen como parte del grupo.
+Por eso deshacer la unión es gratis y no pierde nada.
+
+- **`GET /api/duplicates`** — pares sospechosos, con el porcentaje, el motivo (`tokens`,
+  `edit-distance`, `containment`, `cover`) y la advertencia de secuela cuando aplica.
+- **`POST /api/duplicates/merge`** `{ canonicalId, aliasId }` — los une. Acepta **cualquier par**
+  de mangas, no solo los sugeridos: es la vía para los títulos en idiomas distintos, que ninguna
+  heurística local puede relacionar. Aplana cadenas y es idempotente.
+- **`POST /api/duplicates/unmerge`** `{ id }` — vuelve a separarlos, con el historial intacto.
+- **`POST /api/duplicates/dismiss`** `{ idA, idB }` — "estos dos NO son el mismo": el par deja de
+  sugerirse, acá y en las demás máquinas después del próximo sync.
+
+En la tarjeta unificada el historial muestra **cada capítulo una sola vez** aunque lo hayas leído
+en los dos sitios (misma identidad de capítulo que usa la ingestión), anotando en qué otro sitio
+se leyó, y `readCount` cuenta capítulos distintos, no filas de evento.
+
+> **Por qué no se consulta un catálogo externo (MangaDex/AniList):** para los títulos en idiomas
+> distintos sería la única forma automática, pero rompe el "local-first, sin dependencias de red"
+> del proyecto, agrega latencia y una fuente de fallo en la ingestión, y el matching por título
+> contra su catálogo tiene sus propios falsos positivos. Ese caso se resuelve a mano desde el
+> dashboard, que es una acción de un click y que además siempre es correcta.
+
+**Cómo probar:** registrar una lectura con el título del sitio A y otra con el del sitio B; debe
+quedar **una sola** entrada en `GET /api/library`, con los dos dominios en `sourceDomains`. Después
+`POST /api/duplicates/unmerge` y confirmar que vuelven a ser dos, cada una con su historial. El
+`count(*)` de `ReadingEvent` tiene que ser el mismo antes y después de todo el flujo.
 
 ---
 

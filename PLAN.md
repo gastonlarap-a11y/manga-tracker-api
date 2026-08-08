@@ -184,7 +184,8 @@ Docs: https://hono.dev/docs/getting-started/bun · https://hono.dev/docs/middlew
      actividad), `GET /api/mangas/:id/history`, `PUT /api/mangas/:id` (corrige solo el
      `canonicalName` visible; NO toca `normalizedSlug`).
    - **`adapters/`** → `GET /api/adapters/:domain`, `POST /api/adapters` (upsert por `domain`).
-   - **`duplicates/`** → `GET /api/duplicates` (solo detección; ver Fase 9).
+   - **`duplicates/`** → `GET /api/duplicates` + `POST /api/duplicates/merge` · `/unmerge` ·
+     `/dismiss` (unión por alias, sin mover events; ver Fase 9).
 6. `src/lib/normalize.ts` con `normalizeSlug(name)` y `parseChapterNumber(label)` (utils puras,
    con sus tests). El número de capítulo lo deriva el servidor, no el cliente.
 
@@ -474,13 +475,24 @@ Interceptar `history.pushState`, `history.replaceState`, evento `popstate`. Re-c
 ### Fase 9 — Deduplicación (solo detección)
 
 - `normalizeSlug()` robusto: `.normalize("NFD").replace(/[\u0300-\u036f]/g, "")` para acentos.
-- `GET /api/duplicates`: pares con similitud Levenshtein ≥ 0.85 (solo sugerencia).
-- Corrección a mano vía `PUT /api/mangas/:id` (cambia el nombre visible, no la clave).
+- `GET /api/duplicates`: pares sospechosos, con el motivo del match y la marca de secuela.
+- `POST /api/duplicates/merge` · `/unmerge` · `/dismiss`: unir, deshacer y descartar un par.
 
-> **Decisión (v2.1): merge POSPUESTO.** `POST /api/mangas/merge` movería events de un manga a otro
-> (UPDATE), lo que contradice la regla append-only (los events nunca se UPDATE/DELETE). Por ahora
-> solo se detecta y se corrige el nombre a mano. Si más adelante hace falta fusionar de verdad, se
-> hará con una tabla de alias (canonical) resuelta en la proyección, sin mover events.
+> **Decisión (v2.2, ago 2026): merge HECHO, por puntero.** La objeción de v2.1 (mover events sería
+> un UPDATE sobre un log append-only) era correcta, y se esquiva entera: no se mueve ningún event.
+> El manga absorbido guarda `mergedIntoSlug` y pasa a ser un *alias* — deja de proyectar tarjeta y
+> sus events se leen como parte del grupo del canónico (`resolveMangaGroups`, `src/lib/manga-groups.ts`).
+> Por eso `unmerge` restaura los dos historiales exactos.
+>
+> El detonante fue un caso real: "Callate dragona malvada…" y "Cállate, malvado dragón…" (el mismo
+> manga en dos sitios) puntúan **0.79** con Levenshtein sobre el slug completo — ni siquiera se
+> listaban como sospechosos. `titleSimilarity` empareja tokens de forma difusa y da **0.96**.
+> Umbrales: 0.92 une sola la ingestión (con guarda anti-secuela), 0.75 sugiere.
+>
+> Los títulos en idiomas distintos no los resuelve ninguna heurística local, y **se decidió no
+> consultar un catálogo externo** (rompería el local-first): se unen a mano desde el dashboard,
+> que acepta cualquier par. `DuplicateDismissal` silencia un par para siempre, y sincroniza como
+> unión igual que los events.
 
 ### Fase 10 — Dashboard
 

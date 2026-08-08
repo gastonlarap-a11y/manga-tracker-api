@@ -14,6 +14,7 @@ import { Binary, type Collection, type Db, MongoClient } from "mongodb";
 import type { MongoConfig } from "../../config";
 import type {
   CoverDoc,
+  DismissalDoc,
   MangaDoc,
   ReadingEventDoc,
   SiteAdapterDoc,
@@ -32,6 +33,8 @@ export interface SyncTarget {
   /** Small enough to read whole; last-write-wins needs their timestamps. */
   readMangas(): Promise<ReplicaDoc[]>;
   readAdapters(): Promise<ReplicaDoc[]>;
+  /** Rejected duplicate pairs; a set union, like events — never removed. */
+  readDismissals(): Promise<ReplicaDoc[]>;
   /** Ids first, so only genuinely new events are transferred. */
   readEventIds(): Promise<Set<string>>;
   readEventDocs(ids: string[]): Promise<ReplicaDoc[]>;
@@ -41,6 +44,7 @@ export interface SyncTarget {
   upsertMangas(docs: MangaDoc[]): Promise<void>;
   insertEvents(docs: ReadingEventDoc[]): Promise<void>;
   upsertAdapters(docs: SiteAdapterDoc[]): Promise<void>;
+  upsertDismissals(docs: DismissalDoc[]): Promise<void>;
   upsertCovers(docs: CoverDoc[]): Promise<void>;
   /**
    * Driven by a manga whose merged state says it has no stored bytes — a
@@ -53,6 +57,7 @@ const MANGAS = "mangas";
 const EVENTS = "readingEvents";
 const ADAPTERS = "siteAdapters";
 const COVERS = "covers";
+const DISMISSALS = "duplicateDismissals";
 
 // Chunk id lookups so a growing history never builds an unbounded $in.
 const ID_BATCH = 500;
@@ -104,6 +109,9 @@ export function createMongoTarget(config: MongoConfig): SyncTarget {
 
     readAdapters: async () =>
       asDocs(await collection<SiteAdapterDoc>(ADAPTERS).find({}).toArray()),
+
+    readDismissals: async () =>
+      asDocs(await collection<DismissalDoc>(DISMISSALS).find({}).toArray()),
 
     async readEventIds() {
       const docs = await collection<Keyed>(EVENTS)
@@ -177,6 +185,21 @@ export function createMongoTarget(config: MongoConfig): SyncTarget {
         return;
       }
       await collection<SiteAdapterDoc>(ADAPTERS).bulkWrite(
+        docs.map((doc) => ({
+          replaceOne: {
+            filter: { _id: doc._id },
+            replacement: doc,
+            upsert: true,
+          },
+        })),
+      );
+    },
+
+    async upsertDismissals(docs) {
+      if (docs.length === 0) {
+        return;
+      }
+      await collection<DismissalDoc>(DISMISSALS).bulkWrite(
         docs.map((doc) => ({
           replaceOne: {
             filter: { _id: doc._id },

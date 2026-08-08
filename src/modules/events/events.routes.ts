@@ -16,6 +16,9 @@ const createEventBodySchema = z
     chapterLabel: z.string().trim().min(1),
     sourceUrl: z.url(),
     coverUrl: z.url().optional(),
+    // The series page this chapter belongs to, when the site exposes one. The
+    // server derives the stored identity key from it; the raw URL is not kept.
+    seriesUrl: z.url().optional(),
   })
   .openapi("CreateEventBody");
 

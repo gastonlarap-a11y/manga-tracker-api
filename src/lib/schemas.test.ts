@@ -14,6 +14,7 @@ describe("toMangaDto", () => {
       status: "completed",
       tags: '["shonen","piratas"]',
       createdAt,
+      mergedIntoSlug: null,
     });
 
     expect(dto).toEqual({
@@ -26,7 +27,25 @@ describe("toMangaDto", () => {
       status: "completed",
       tags: ["shonen", "piratas"],
       createdAt: "2026-07-01T10:00:00.000Z",
+      mergedIntoSlug: null,
     });
+  });
+
+  it("carries the merge pointer through, so clients can tell an alias apart", () => {
+    const dto = toMangaDto({
+      id: "m2",
+      canonicalName: "Cállate, malvado dragón",
+      normalizedSlug: "callate-malvado-dragon",
+      coverUrl: null,
+      coverImage: null,
+      coverVersion: 0,
+      status: "reading",
+      tags: "[]",
+      createdAt: new Date("2026-07-01T10:00:00.000Z"),
+      mergedIntoSlug: "callate-dragona-malvada",
+    });
+
+    expect(dto.mergedIntoSlug).toBe("callate-dragona-malvada");
   });
 });
 

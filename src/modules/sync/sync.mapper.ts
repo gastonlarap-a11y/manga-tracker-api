@@ -32,6 +32,22 @@ export interface MangaDoc {
   updatedAt: Date;
   /** Soft delete travels as a value; absence would be ambiguous. */
   deletedAt: Date | null;
+  /**
+   * The canonical this manga was merged into, as a slug — the same natural key
+   * the documents are already addressed by, so the pointer means the same thing
+   * on every machine (a local uuid would be meaningless to a peer).
+   * Converges last-write-wins on updatedAt like any other field.
+   */
+  mergedIntoSlug: string | null;
+}
+
+/** "These two are not the same manga", keyed by the ordered slug pair. */
+export interface DismissalDoc {
+  /** `${slugA}|${slugB}`, both already in lexicographic order. */
+  _id: string;
+  slugA: string;
+  slugB: string;
+  createdAt: Date;
 }
 
 export interface ReadingEventDoc {
@@ -43,6 +59,8 @@ export interface ReadingEventDoc {
   sourceUrl: string;
   sourceDomain: string;
   readAt: Date;
+  /** Series-page identity within a site; null for events recorded without one. */
+  seriesKey: string | null;
 }
 
 export interface SiteAdapterDoc {
@@ -77,6 +95,13 @@ interface MangaRow {
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
+  mergedIntoSlug: string | null;
+}
+
+interface DismissalRow {
+  slugA: string;
+  slugB: string;
+  createdAt: Date;
 }
 
 interface ReadingEventRow {
@@ -86,6 +111,7 @@ interface ReadingEventRow {
   sourceUrl: string;
   sourceDomain: string;
   readAt: Date;
+  seriesKey: string | null;
 }
 
 interface SiteAdapterRow {
@@ -116,6 +142,16 @@ export function toMangaDoc(manga: MangaRow): MangaDoc {
     createdAt: manga.createdAt,
     updatedAt: manga.updatedAt,
     deletedAt: manga.deletedAt,
+    mergedIntoSlug: manga.mergedIntoSlug,
+  };
+}
+
+export function toDismissalDoc(row: DismissalRow): DismissalDoc {
+  return {
+    _id: `${row.slugA}|${row.slugB}`,
+    slugA: row.slugA,
+    slugB: row.slugB,
+    createdAt: row.createdAt,
   };
 }
 
@@ -131,6 +167,7 @@ export function toEventDoc(
     sourceUrl: event.sourceUrl,
     sourceDomain: event.sourceDomain,
     readAt: event.readAt,
+    seriesKey: event.seriesKey,
   };
 }
 
@@ -240,6 +277,7 @@ export interface MangaMerge {
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
+  mergedIntoSlug: string | null;
 }
 
 export function fromMangaDoc(doc: Record<string, unknown>): MangaMerge {
@@ -258,7 +296,30 @@ export function fromMangaDoc(doc: Record<string, unknown>): MangaMerge {
     createdAt: asDate(doc.createdAt),
     updatedAt: asDate(doc.updatedAt),
     deletedAt: asNullableDate(doc.deletedAt),
+    // Kept exactly as written, even when the target slug is unknown here: the
+    // peer's canonical may simply not have arrived yet, and resolveCanonical
+    // already treats a dangling pointer as "canonical for now". Clearing it
+    // would make the two machines strip each other's merge forever.
+    mergedIntoSlug: asNullableString(doc.mergedIntoSlug),
   };
+}
+
+export interface DismissalMerge {
+  slugA: string;
+  slugB: string;
+  createdAt: Date;
+}
+
+/** Null when the document carries no usable pair — it is skipped, not guessed. */
+export function fromDismissalDoc(
+  doc: Record<string, unknown>,
+): DismissalMerge | null {
+  const slugA = asString(doc.slugA);
+  const slugB = asString(doc.slugB);
+  if (slugA === "" || slugB === "" || slugA === slugB) {
+    return null;
+  }
+  return { slugA, slugB, createdAt: asDate(doc.createdAt) };
 }
 
 export interface EventMerge {
@@ -269,6 +330,7 @@ export interface EventMerge {
   sourceUrl: string;
   sourceDomain: string;
   readAt: Date;
+  seriesKey: string | null;
 }
 
 export function fromEventDoc(doc: Record<string, unknown>): EventMerge {
@@ -280,6 +342,7 @@ export function fromEventDoc(doc: Record<string, unknown>): EventMerge {
     sourceUrl: asString(doc.sourceUrl),
     sourceDomain: asString(doc.sourceDomain),
     readAt: asDate(doc.readAt),
+    seriesKey: asNullableString(doc.seriesKey),
   };
 }
 

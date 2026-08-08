@@ -26,6 +26,7 @@ const mangaRow = {
   createdAt: new Date("2026-01-15T10:00:00.000Z"),
   updatedAt: new Date("2026-02-20T10:00:00.000Z"),
   deletedAt: null,
+  mergedIntoSlug: null,
 };
 
 const eventRow = {
@@ -35,6 +36,7 @@ const eventRow = {
   sourceUrl: "https://olympusxyz.com/op/130-5",
   sourceDomain: "olympusxyz.com",
   readAt: new Date("2026-02-01T12:00:00.000Z"),
+  seriesKey: "olympusxyz.com/one-piece",
 };
 
 const adapterRow = {
@@ -146,6 +148,8 @@ describe("Sync mapper: shared documents -> SQLite", () => {
     expect(event.mangaSlug).toBe("one-piece");
     expect(event.chapterNumber).toBe(130.5);
     expect(event.readAt).toEqual(eventRow.readAt);
+    // Series identity travels too, so a peer keeps recognising the series.
+    expect(event.seriesKey).toBe("olympusxyz.com/one-piece");
 
     const adapter = fromAdapterDoc({ ...toAdapterDoc(adapterRow) });
     expect(adapter.domain).toBe("olympusxyz.com");
