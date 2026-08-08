@@ -40,15 +40,30 @@ export const libraryEntrySchema = z
       .object({ readAt: z.iso.datetime(), chapterLabel: z.string() })
       .nullable(),
     lastSourceUrl: z.string().nullable(),
+    // Distinct chapters read, not event rows: a chapter read on two merged
+    // sites counts once.
     readCount: z.number().int(),
     sourceDomains: z.array(z.string()),
+    // How many other mangas were merged into this card; 0 for an untouched one.
+    aliasCount: z.number().int(),
   })
   .openapi("LibraryEntry");
+
+export const historyEventSchema = readingEventSchema
+  .extend({
+    // Other domains where this same chapter was read. Non-empty only after a
+    // merge: the chapter is listed once, and this says where else it was read.
+    alsoReadOn: z.array(z.string()),
+  })
+  .openapi("HistoryEvent");
 
 export const mangaHistorySchema = z
   .object({
     manga: mangaSchema,
-    events: z.array(readingEventSchema),
+    // The mangas merged into this one. Empty for an untouched card; each entry
+    // can be detached again with POST /duplicates/unmerge.
+    aliases: z.array(mangaSchema),
+    events: z.array(historyEventSchema),
   })
   .openapi("MangaHistory");
 
@@ -248,7 +263,11 @@ export const libraryRoutes = new OpenAPIHono({ defaultHook })
     return c.json(
       {
         manga: toMangaDto(history.manga),
-        events: history.events.map(toEventDto),
+        aliases: history.aliases.map(toMangaDto),
+        events: history.events.map((event) => ({
+          ...toEventDto(event),
+          alsoReadOn: event.alsoReadOn,
+        })),
       },
       200,
     );

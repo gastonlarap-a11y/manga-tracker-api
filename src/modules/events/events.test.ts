@@ -298,3 +298,230 @@ describe("POST /events", () => {
     expect(await prisma.readingEvent.count()).toBe(0);
   });
 });
+
+// The two titles that used to produce two cards for one series.
+const TITLE_A = "Callate dragona malvada, ya no quiero criar hijos contigo";
+const TITLE_B = "Cállate, malvado dragón, ya no quiero criar hijos contigo";
+
+describe("POST /events joining one series read on two sites", () => {
+  it("lands the second site's title on the first card instead of creating another", async () => {
+    const first = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: TITLE_A,
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://sitio-a.com/dragona/1",
+        })
+      ).json(),
+    );
+
+    const second = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: TITLE_B,
+          chapterLabel: "Capítulo 2",
+          sourceUrl: "https://sitio-b.com/dragon/2",
+        })
+      ).json(),
+    );
+
+    // Same card, both readings on it.
+    expect(second.manga.id).toBe(first.manga.id);
+    expect(second.event.mangaId).toBe(first.manga.id);
+    // The second title still exists as a row, marked as absorbed, so the merge
+    // is a fact that syncs and can be undone.
+    const alias = await prisma.manga.findFirstOrThrow({
+      where: { canonicalName: TITLE_B },
+    });
+    expect(alias.mergedIntoSlug).toBe(first.manga.normalizedSlug);
+    expect(await prisma.manga.count()).toBe(2);
+  });
+
+  it("does not append a chapter already read on the other site", async () => {
+    await postEvent({
+      mangaName: TITLE_A,
+      chapterLabel: "Cap. 7",
+      sourceUrl: "https://sitio-a.com/dragona/7",
+    });
+
+    const res = await postEvent({
+      mangaName: TITLE_B,
+      chapterLabel: "Capítulo 7",
+      sourceUrl: "https://sitio-b.com/dragon/7",
+    });
+
+    expect(res.status).toBe(200);
+    expect(
+      createEventResponseSchema.parse(await res.json()).event.sourceDomain,
+    ).toBe("sitio-a.com");
+    expect(await prisma.readingEvent.count()).toBe(1);
+  });
+
+  it("never merges a suspected sequel on its own", async () => {
+    const first = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Dr. Stone",
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://sitio-a.com/dr-stone/1",
+        })
+      ).json(),
+    );
+
+    const second = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Dr. Stone 2",
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://sitio-a.com/dr-stone-2/1",
+        })
+      ).json(),
+    );
+
+    expect(second.manga.id).not.toBe(first.manga.id);
+    expect(second.manga.mergedIntoSlug).toBeNull();
+  });
+
+  it("leaves an unrelated title alone", async () => {
+    await postEvent({
+      mangaName: TITLE_A,
+      chapterLabel: "Cap. 1",
+      sourceUrl: "https://sitio-a.com/dragona/1",
+    });
+    const other = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Berserk",
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://sitio-a.com/berserk/1",
+        })
+      ).json(),
+    );
+
+    expect(other.manga.mergedIntoSlug).toBeNull();
+    expect(await prisma.manga.count()).toBe(2);
+  });
+
+  it("routes a reading on a manually merged manga to the surviving card", async () => {
+    // Two titles no heuristic can relate, joined by hand from the dashboard.
+    const spanish = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Cállate dragona",
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://sitio-a.com/dragona/1",
+        })
+      ).json(),
+    );
+    const english = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Shut Up, Evil Dragon",
+          chapterLabel: "Cap. 5",
+          sourceUrl: "https://sitio-b.com/dragon/5",
+        })
+      ).json(),
+    );
+    await prisma.manga.update({
+      where: { id: english.manga.id },
+      data: { mergedIntoSlug: spanish.manga.normalizedSlug },
+    });
+
+    // Keep reading on the English site: the event must land on the Spanish card.
+    const next = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Shut Up, Evil Dragon",
+          chapterLabel: "Cap. 6",
+          sourceUrl: "https://sitio-b.com/dragon/6",
+        })
+      ).json(),
+    );
+
+    expect(next.manga.id).toBe(spanish.manga.id);
+    expect(next.event.mangaId).toBe(spanish.manga.id);
+    expect(await prisma.manga.count()).toBe(2);
+  });
+
+  it("keeps a series on one card when the site reformats its title", async () => {
+    // Strongest identity a single site can give: the series page does not move
+    // when the site starts appending the scanlation group to its <title>.
+    const first = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Cállate dragona",
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://sitio-a.com/leer/dragona/1",
+          seriesUrl: "https://sitio-a.com/manga/dragona/",
+        })
+      ).json(),
+    );
+
+    const second = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Cállate dragona - Scan Group [ESP]",
+          chapterLabel: "Cap. 2",
+          sourceUrl: "https://sitio-a.com/leer/dragona/2",
+          seriesUrl: "https://sitio-a.com/manga/dragona",
+        })
+      ).json(),
+    );
+
+    expect(second.manga.id).toBe(first.manga.id);
+    expect(await prisma.manga.count()).toBe(1);
+  });
+
+  it("does not join two sites just because their series paths match", async () => {
+    const first = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Alpha",
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://sitio-a.com/leer/x/1",
+          seriesUrl: "https://sitio-a.com/manga/x",
+        })
+      ).json(),
+    );
+    const second = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: "Beta",
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://sitio-b.com/leer/x/1",
+          seriesUrl: "https://sitio-b.com/manga/x",
+        })
+      ).json(),
+    );
+
+    expect(second.manga.id).not.toBe(first.manga.id);
+  });
+
+  it("revives the surviving card, not the alias, when the series is read again", async () => {
+    const first = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: TITLE_A,
+          chapterLabel: "Cap. 1",
+          sourceUrl: "https://sitio-a.com/dragona/1",
+        })
+      ).json(),
+    );
+    await prisma.manga.update({
+      where: { id: first.manga.id },
+      data: { deletedAt: new Date() },
+    });
+
+    const back = createEventResponseSchema.parse(
+      await (
+        await postEvent({
+          mangaName: TITLE_A,
+          chapterLabel: "Cap. 2",
+          sourceUrl: "https://sitio-a.com/dragona/2",
+        })
+      ).json(),
+    );
+    expect(back.manga.id).toBe(first.manga.id);
+    expect(back.manga.mergedIntoSlug).toBeNull();
+  });
+});

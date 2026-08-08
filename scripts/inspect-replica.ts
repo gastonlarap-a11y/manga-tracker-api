@@ -36,11 +36,17 @@ try {
   const db = client.db(dbName);
   console.log(`Replica: ${dbName}\n`);
 
-  const collections = ["mangas", "readingEvents", "siteAdapters", "covers"];
+  const collections = [
+    "mangas",
+    "readingEvents",
+    "siteAdapters",
+    "covers",
+    "duplicateDismissals",
+  ];
   for (const name of collections) {
     const collection = db.collection(name);
     const count = await collection.countDocuments();
-    console.log(`${name.padEnd(14)} ${String(count).padStart(6)} documents`);
+    console.log(`${name.padEnd(20)} ${String(count).padStart(6)} documents`);
     if (count > 0) {
       const indexes = await collection.indexes();
       const described = indexes
@@ -48,7 +54,7 @@ try {
           (index) => `${index.name}${index.unique === true ? " (unique)" : ""}`,
         )
         .join(", ");
-      console.log(`${" ".repeat(14)} indexes: ${described}`);
+      console.log(`${" ".repeat(20)} indexes: ${described}`);
     }
   }
 

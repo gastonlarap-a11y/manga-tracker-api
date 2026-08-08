@@ -19,18 +19,28 @@ import { publishLibraryChanged } from "../events/events.bus";
 import {
   fromAdapterDoc,
   fromCoverDoc,
+  fromDismissalDoc,
   fromEventDoc,
   fromMangaDoc,
   toAdapterDoc,
   toCoverDoc,
+  toDismissalDoc,
   toEventDoc,
   toMangaDoc,
 } from "./sync.mapper";
 import type { SyncTarget } from "./sync.target";
 
+interface SyncCounts {
+  mangas: number;
+  events: number;
+  adapters: number;
+  covers: number;
+  dismissals: number;
+}
+
 export interface SyncResult {
-  pulled: { mangas: number; events: number; adapters: number; covers: number };
-  pushed: { mangas: number; events: number; adapters: number; covers: number };
+  pulled: SyncCounts;
+  pushed: SyncCounts;
 }
 
 export interface SyncOptions {
@@ -50,13 +60,15 @@ const mangaMetaSelect = {
   createdAt: true,
   updatedAt: true,
   deletedAt: true,
+  mergedIntoSlug: true,
 } as const;
 
-const empty = (): SyncResult["pulled"] => ({
+const empty = (): SyncCounts => ({
   mangas: 0,
   events: 0,
   adapters: 0,
   covers: 0,
+  dismissals: 0,
 });
 
 /**
@@ -96,6 +108,7 @@ export async function syncWithReplica(
           createdAt: remote.createdAt,
           updatedAt: remote.updatedAt,
           deletedAt: remote.deletedAt,
+          mergedIntoSlug: remote.mergedIntoSlug,
         },
       });
       pulled.mangas += 1;
@@ -114,6 +127,7 @@ export async function syncWithReplica(
           tags: remote.tags,
           updatedAt: remote.updatedAt,
           deletedAt: remote.deletedAt,
+          mergedIntoSlug: remote.mergedIntoSlug,
         },
       });
       pulled.mangas += 1;
@@ -156,6 +170,7 @@ export async function syncWithReplica(
               sourceUrl: event.sourceUrl,
               sourceDomain: event.sourceDomain,
               readAt: event.readAt,
+              seriesKey: event.seriesKey,
             };
       })
       .filter((row): row is NonNullable<typeof row> => row !== null);
@@ -197,6 +212,36 @@ export async function syncWithReplica(
       });
       pulled.adapters += 1;
     }
+  }
+
+  // ---- Dismissed duplicate pairs: set union, never a deletion -------------
+  // A rejected suggestion is a judgement the user made once; it must hold on
+  // every machine, and (like events) absence on one side only ever means "not
+  // synced yet". Nothing here is ever removed.
+  const remoteDismissals = (await target.readDismissals())
+    .map(fromDismissalDoc)
+    .filter((row): row is NonNullable<typeof row> => row !== null);
+  const localDismissals = await prisma.duplicateDismissal.findMany();
+  const localDismissalKeys = new Set(
+    localDismissals.map((row) => `${row.slugA}|${row.slugB}`),
+  );
+
+  const newDismissals = remoteDismissals.filter(
+    (remote) => !localDismissalKeys.has(`${remote.slugA}|${remote.slugB}`),
+  );
+  if (newDismissals.length > 0) {
+    // The row carries no mutable state, so a pair known on both sides needs no
+    // conflict resolution at all — only the genuinely new ones are inserted.
+    // (createMany's skipDuplicates is not available on SQLite.)
+    await prisma.duplicateDismissal.createMany({
+      data: newDismissals.map((remote) => ({
+        slugA: remote.slugA,
+        slugB: remote.slugB,
+        createdAt: remote.createdAt,
+        updatedAt: remote.createdAt,
+      })),
+    });
+    pulled.dismissals = newDismissals.length;
   }
 
   // ---- Push whatever is newer or missing on the other side ----------------
@@ -255,13 +300,25 @@ export async function syncWithReplica(
   await target.upsertAdapters(adapterDocsToPush);
   pushed.adapters = adapterDocsToPush.length;
 
+  const remoteDismissalKeys = new Set(
+    remoteDismissals.map((row) => `${row.slugA}|${row.slugB}`),
+  );
+  const dismissalDocsToPush = localDismissals
+    .filter((row) => !remoteDismissalKeys.has(`${row.slugA}|${row.slugB}`))
+    .map(toDismissalDoc);
+  await target.upsertDismissals(dismissalDocsToPush);
+  pushed.dismissals = dismissalDocsToPush.length;
+
   if (options.covers) {
     const moved = await syncCovers(target, covered, remoteMangas);
     pulled.covers = moved.pulled;
     pushed.covers = moved.pushed;
   }
 
-  if (pulled.mangas + pulled.events + pulled.adapters + pulled.covers > 0) {
+  if (
+    pulled.mangas + pulled.events + pulled.adapters + pulled.covers > 0 ||
+    pulled.dismissals > 0
+  ) {
     // An open dashboard should show what another machine recorded.
     publishLibraryChanged();
   }
@@ -360,6 +417,7 @@ export type RestoreOutcome =
       events: number;
       adapters: number;
       covers: number;
+      dismissals: number;
     }
   | {
       kind: "local-not-empty";
@@ -395,6 +453,9 @@ export async function restoreFromReplica(
 
   await prisma.manga.deleteMany();
   await prisma.siteAdapter.deleteMany();
+  // Dismissals reference slugs that are about to be replaced wholesale; they
+  // come back from the shared store in the same pass.
+  await prisma.duplicateDismissal.deleteMany();
 
   const result = await syncWithReplica(target, { covers: true });
   return {
@@ -403,5 +464,6 @@ export async function restoreFromReplica(
     events: result.pulled.events,
     adapters: result.pulled.adapters,
     covers: result.pulled.covers,
+    dismissals: result.pulled.dismissals,
   };
 }

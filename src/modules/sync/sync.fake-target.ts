@@ -4,6 +4,7 @@
 // what a peer pushed, then syncs and asserts what this machine did with them.
 import type {
   CoverDoc,
+  DismissalDoc,
   MangaDoc,
   ReadingEventDoc,
   SiteAdapterDoc,
@@ -15,6 +16,7 @@ export interface FakeTarget extends SyncTarget {
   readonly events: Map<string, ReadingEventDoc>;
   readonly adapters: Map<string, SiteAdapterDoc>;
   readonly covers: Map<string, CoverDoc>;
+  readonly dismissals: Map<string, DismissalDoc>;
   readonly calls: { eventsInserted: number; coversUploaded: number };
 }
 
@@ -23,6 +25,7 @@ export function createFakeTarget(): FakeTarget {
   const events = new Map<string, ReadingEventDoc>();
   const adapters = new Map<string, SiteAdapterDoc>();
   const covers = new Map<string, CoverDoc>();
+  const dismissals = new Map<string, DismissalDoc>();
   const calls = { eventsInserted: 0, coversUploaded: 0 };
 
   // Reads go through a clone so a test cannot accidentally assert on the very
@@ -36,6 +39,7 @@ export function createFakeTarget(): FakeTarget {
     events,
     adapters,
     covers,
+    dismissals,
     calls,
 
     connect: async () => {},
@@ -43,6 +47,7 @@ export function createFakeTarget(): FakeTarget {
 
     readMangas: async () => [...mangas.values()].map(clone),
     readAdapters: async () => [...adapters.values()].map(clone),
+    readDismissals: async () => [...dismissals.values()].map(clone),
     readEventIds: async () => new Set(events.keys()),
     readEventDocs: async (ids) =>
       ids
@@ -83,6 +88,12 @@ export function createFakeTarget(): FakeTarget {
     upsertAdapters: async (docs) => {
       for (const doc of docs) {
         adapters.set(doc._id, doc);
+      }
+    },
+
+    upsertDismissals: async (docs) => {
+      for (const doc of docs) {
+        dismissals.set(doc._id, doc);
       }
     },
 

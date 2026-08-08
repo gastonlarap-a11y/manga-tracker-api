@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { normalizeSlug, parseChapterNumber } from "./normalize";
+import {
+  chapterKey,
+  normalizeSlug,
+  parseChapterNumber,
+  seriesKeyFromUrl,
+} from "./normalize";
 
 describe("Domain Utilities: normalizeSlug", () => {
   it("should normalize diacritics and accents correctly", () => {
@@ -53,5 +58,57 @@ describe("Domain Utilities: parseChapterNumber", () => {
     expect(parseChapterNumber("Capítulo Especial")).toBeNull();
     expect(parseChapterNumber("Extra Chapter Omake")).toBeNull();
     expect(parseChapterNumber("")).toBeNull();
+  });
+});
+
+describe("seriesKeyFromUrl", () => {
+  it("keys a series by host and path, ignoring query, hash and case", () => {
+    expect(seriesKeyFromUrl("https://Sitio-A.com/manga/Dragona/")).toBe(
+      "sitio-a.com/manga/dragona",
+    );
+    expect(
+      seriesKeyFromUrl("https://sitio-a.com/manga/dragona?ref=home#top"),
+    ).toBe("sitio-a.com/manga/dragona");
+  });
+
+  it("gives the same key for the same series page written differently", () => {
+    // The point of the key: one series page, one identity, whatever the site
+    // decides to call the series in its <title> today.
+    expect(seriesKeyFromUrl("https://sitio-a.com/manga/dragona")).toBe(
+      seriesKeyFromUrl("https://sitio-a.com/manga/dragona/"),
+    );
+  });
+
+  it("returns null for anything that identifies no series", () => {
+    expect(seriesKeyFromUrl("https://sitio-a.com/")).toBeNull();
+    expect(seriesKeyFromUrl("https://sitio-a.com")).toBeNull();
+    expect(seriesKeyFromUrl("not-a-url")).toBeNull();
+    expect(seriesKeyFromUrl("javascript:alert(1)")).toBeNull();
+  });
+
+  it("keeps two sites apart even when the path matches", () => {
+    expect(seriesKeyFromUrl("https://sitio-a.com/manga/dragona")).not.toBe(
+      seriesKeyFromUrl("https://sitio-b.com/manga/dragona"),
+    );
+  });
+});
+
+describe("chapterKey", () => {
+  it("treats the same number under different labels as one chapter", () => {
+    expect(chapterKey({ chapterNumber: 49, chapterLabel: "Cap. 49" })).toBe(
+      chapterKey({ chapterNumber: 49, chapterLabel: "Chapter 49" }),
+    );
+  });
+
+  it("falls back to the exact label when nothing parsed", () => {
+    expect(
+      chapterKey({ chapterNumber: null, chapterLabel: "Especial" }),
+    ).not.toBe(chapterKey({ chapterNumber: null, chapterLabel: "Omake" }));
+  });
+
+  it("never confuses a number with a label that reads the same", () => {
+    expect(chapterKey({ chapterNumber: 5, chapterLabel: "5" })).not.toBe(
+      chapterKey({ chapterNumber: null, chapterLabel: "5" }),
+    );
   });
 });

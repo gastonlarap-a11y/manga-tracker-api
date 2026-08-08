@@ -42,8 +42,39 @@ model Manga {
   // rather than something inferred from a row being absent — absence is
   // ambiguous across machines and used to mean "delete this from the replica".
   deletedAt      DateTime?
+  // normalizedSlug of the canonical manga that absorbed this one. A non-null
+  // value turns this row into an ALIAS: it stops projecting as its own card and
+  // its events are read as part of the canonical's group. Merging this way moves
+  // no ReadingEvent, so the append-only rule survives untouched.
+  // By slug and not by id because sync is keyed on natural keys (sync.mapper.ts):
+  // two machines mint different uuids for the same manga but agree on the slug.
+  // Converges last-write-wins on updatedAt, like every other field here.
+  mergedIntoSlug String?
 
   events ReadingEvent[]
+
+  @@index([mergedIntoSlug])
+}
+
+// ------------------------------------------------------
+// Duplicate Detection: rejected suggestions
+// ------------------------------------------------------
+/// "These two are NOT the same manga" — silences a pair in /duplicates forever.
+/// The mandatory counterpart of lowering the detection threshold: without it a
+/// false positive comes back on every load of the view and the report is noise.
+model DuplicateDismissal {
+  id String @id @default(uuid())
+
+  // The two normalizedSlugs, always stored in lexicographic order, so the pair
+  // (a,b) and the pair (b,a) are the same row on every machine.
+  slugA String
+  slugB String
+
+  createdAt DateTime @default(now())
+  // Same reasoning as Manga.updatedAt: set explicitly, never by @updatedAt.
+  updatedAt DateTime @default(now())
+
+  @@unique([slugA, slugB])
 }
 
 // ------------------------------------------------------
@@ -62,10 +93,19 @@ model ReadingEvent {
   sourceDomain String
   readAt       DateTime @default(now())
 
+  // "<host><path>" of the SERIES page this chapter belongs to, derived by the
+  // server from the seriesUrl the extension reports. It is the strongest
+  // identity a single site can offer: the series path does not change when the
+  // site reformats its <title>, so the same series never splits into two
+  // mangas on one domain. Null when the page exposed no series link.
+  seriesKey String?
+
   manga Manga @relation(fields: [mangaId], references: [id], onDelete: Cascade)
 
   // Critical index for the Library view: "Get the latest readAt for a specific mangaId"
   @@index([mangaId, readAt(sort: Desc)])
+  // Drives the "which manga is this series?" lookup on every ingestion.
+  @@index([seriesKey])
 }
 
 // ------------------------------------------------------
