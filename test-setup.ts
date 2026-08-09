@@ -1,8 +1,8 @@
-import { Database } from "bun:sqlite";
 import { afterAll } from "bun:test";
-import { readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { applyMigrations } from "./src/db/migrate";
 
 // One throwaway SQLite DB per test run: config.ts reads DATABASE_URL once at
 // import time and db/client.ts holds a process-wide PrismaClient singleton, so
@@ -22,21 +22,10 @@ Bun.env.DATABASE_URL = `file:${dbPath}`;
 delete Bun.env.MONGODB_URL;
 delete Bun.env.MONGODB_DB;
 
-// Apply the committed migrations synchronously (bun:sqlite, no Prisma CLI
-// spawn) so tests run against the exact schema production gets.
-const migrationsDir = join(import.meta.dir, "prisma", "migrations");
-const db = new Database(dbPath, { create: true });
-for (const dir of readdirSync(migrationsDir)
-  .filter((entry) => statSync(join(migrationsDir, entry)).isDirectory())
-  .sort()) {
-  const sql = readFileSync(join(migrationsDir, dir, "migration.sql"), "utf8");
-  for (const statement of sql.split(";")) {
-    if (statement.trim()) {
-      db.run(statement);
-    }
-  }
-}
-db.close();
+// Apply the committed migrations synchronously so tests run against the exact
+// schema production gets — through the very same function the server calls on
+// startup, which means every test run is also a test of the migrator.
+applyMigrations(`file:${dbPath}`);
 
 afterAll(() => {
   for (const suffix of ["", "-journal", "-wal", "-shm"]) {

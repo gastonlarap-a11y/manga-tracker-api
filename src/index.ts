@@ -3,6 +3,7 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
 import { config } from "./config";
+import { applyMigrations } from "./db/migrate";
 import { adaptersRoutes } from "./modules/adapters/adapters.routes";
 import { duplicatesRoutes } from "./modules/duplicates/duplicates.routes";
 import { eventsRoutes } from "./modules/events/events.routes";
@@ -10,6 +11,16 @@ import { healthRoutes } from "./modules/health/health.routes";
 import { libraryRoutes } from "./modules/library/library.routes";
 import { syncRoutes } from "./modules/sync/sync.routes";
 import { startSyncScheduler } from "./modules/sync/sync.scheduler";
+
+// Before anything opens a connection: a server that answers /health and then
+// fails on the first query is worse than one that refuses to start. Idempotent,
+// so the usual case (already up to date) is a read and nothing else.
+const migration = applyMigrations(config.databaseUrl, config.migrationsDir);
+if (migration.applied.length > 0) {
+  console.info(
+    `[db] applied ${migration.applied.length} migration(s): ${migration.applied.join(", ")}`,
+  );
+}
 
 const app = new OpenAPIHono();
 
