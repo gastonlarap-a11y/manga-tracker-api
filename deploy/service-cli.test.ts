@@ -7,6 +7,7 @@ import { createFakeRunner } from "./lib/run";
 import {
   environmentFor,
   firstFreePort,
+  hostOf,
   parseArgs,
   runCommand,
   type StdinReader,
@@ -339,6 +340,72 @@ describe("status", () => {
       expect(reply).toMatchObject({ syncConfigured: true });
       expect(JSON.stringify(reply)).not.toContain("secret");
     });
+  });
+
+  it("reports where it points, so the app can say what it syncs against", async () => {
+    await inTempDir(async (dir) => {
+      const fake = fakeAdapter("darwin");
+      await runCommand(
+        runner(),
+        ["install", "--app-dir", "/a", "--data-dir", dir, "--port", "5151"],
+        fake.adapter,
+      );
+      await runCommand(
+        runner(),
+        ["set-sync", "--db", "mangas"],
+        fake.adapter,
+        onStdin(
+          "mongodb://dbreader93:hunter2@cluster.example.com:10260/?tls=true",
+        ),
+      );
+
+      const reply = await runCommand(runner(), ["status"], fake.adapter);
+
+      expect(reply).toMatchObject({
+        syncHost: "cluster.example.com:10260",
+        syncDb: "mangas",
+      });
+      // The whole point of parsing it here rather than in the window. Both
+      // halves of the credential: a distinctive account name, not "user",
+      // which is too common a substring to prove anything.
+      expect(JSON.stringify(reply)).not.toContain("hunter2");
+      expect(JSON.stringify(reply)).not.toContain("dbreader93");
+    });
+  });
+});
+
+describe("hostOf", () => {
+  it.each([
+    [
+      "mongodb://cluster.example.com:10260/?tls=true",
+      "cluster.example.com:10260",
+    ],
+    [
+      "mongodb://user:pass@cluster.example.com:10260/db",
+      "cluster.example.com:10260",
+    ],
+    ["mongodb+srv://user:pass@cluster.example.com/", "cluster.example.com"],
+    ["mongodb://host", "host"],
+    // A seed list: legal in a MongoDB URI, and not a URL at all — `new URL()`
+    // throws on precisely the addresses a replica set produces.
+    [
+      "mongodb://a.example.com:27017,b.example.com:27018/?tls=true",
+      "a.example.com:27017,b.example.com:27018",
+    ],
+  ])("takes the server out of %s", (raw, expected) => {
+    expect(hostOf(raw)).toBe(expected);
+  });
+
+  it("never hands back a credential", () => {
+    // The last @, not the first: a password may hold an encoded one, and
+    // splitting on the first would return the tail of the secret as a hostname.
+    expect(hostOf("mongodb://user:p%40ss@real-host:10260/db")).toBe(
+      "real-host:10260",
+    );
+  });
+
+  it.each([null, ""])("answers with nothing for %p", (raw) => {
+    expect(hostOf(raw)).toBe("");
   });
 });
 

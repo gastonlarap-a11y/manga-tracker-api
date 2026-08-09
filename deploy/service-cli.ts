@@ -105,6 +105,30 @@ export async function firstFreePort(): Promise<number> {
   );
 }
 
+/**
+ * The server part of a connection string, and nothing else.
+ *
+ * Written by hand rather than with `new URL()`: a MongoDB URI may carry a seed
+ * list (`mongodb://a:1,b:2/`), which is legal there and not a URL at all, so the
+ * parser throws on exactly the addresses a replica set produces.
+ *
+ * Everything before the last `@` is dropped, which is where the user and the
+ * password live. This function must never be able to return them — it is what
+ * the app puts on screen.
+ */
+export function hostOf(raw: string | null): string {
+  if (raw === null || raw === "") {
+    return "";
+  }
+  const withoutScheme = raw.replace(/^mongodb(\+srv)?:\/\//i, "");
+  // The last one: a password may contain an encoded @, and splitting on the
+  // first would hand back the tail of a credential as if it were a hostname.
+  const afterCredentials = withoutScheme.slice(
+    withoutScheme.lastIndexOf("@") + 1,
+  );
+  return afterCredentials.split(/[/?]/)[0] ?? "";
+}
+
 /** The four values an installed backend needs. Nothing personal is among them. */
 export function environmentFor(
   appDir: string,
@@ -182,6 +206,9 @@ async function status(run: Runner, adapter: PlatformAdapter): Promise<Reply> {
   // is what lets the app offer to carry it over instead of silently turning
   // sync off.
   const stored = await adapter.readSecret(run);
+  const syncDb = installed
+    ? await adapter.readConfigEnv(run, "MONGODB_DB")
+    : null;
   return {
     ok: true,
     installed,
@@ -189,6 +216,11 @@ async function status(run: Runner, adapter: PlatformAdapter): Promise<Reply> {
     // Whether it is configured, never the credential itself.
     syncConfigured: syncUrl !== null && syncUrl !== "",
     hasStoredCredential: stored !== null && stored !== "",
+    // Where it points, so the app can say what it is synchronising against
+    // instead of showing an empty form to someone who is already connected.
+    // Host and database only — the user and the password stay here.
+    syncHost: hostOf(syncUrl),
+    syncDb: syncDb ?? "",
     configPath: adapter.configPath,
     service: adapter.serviceLabel,
   };
