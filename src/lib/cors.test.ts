@@ -1,19 +1,26 @@
 import { describe, expect, it } from "bun:test";
 import {
   allowedOrigins,
+  DEFAULT_EXTENSION_IDS,
   parseExtensionIds,
+  STORE_EXTENSION_ID,
   UNPACKED_EXTENSION_ID,
 } from "./cors";
 
 const STORE_ID = "abcdefghijklmnopabcdefghijklmnop";
 
 describe("parseExtensionIds", () => {
-  it("falls back to the unpacked id when nothing is configured", () => {
-    // A checkout with no .env still has to be able to talk to the extension a
-    // developer loaded by hand.
-    expect(parseExtensionIds(undefined)).toEqual([UNPACKED_EXTENSION_ID]);
-    expect(parseExtensionIds("")).toEqual([UNPACKED_EXTENSION_ID]);
-    expect(parseExtensionIds("   ")).toEqual([UNPACKED_EXTENSION_ID]);
+  it("falls back to every published id when nothing is configured", () => {
+    // A machine with no .env has to reach the backend whichever build it
+    // installed: the Web Store one or a hand-loaded developer build.
+    expect(parseExtensionIds(undefined)).toEqual(DEFAULT_EXTENSION_IDS);
+    expect(parseExtensionIds("")).toEqual(DEFAULT_EXTENSION_IDS);
+    expect(parseExtensionIds("   ")).toEqual(DEFAULT_EXTENSION_IDS);
+  });
+
+  it("defaults to both the unpacked and the Web Store build", () => {
+    expect(DEFAULT_EXTENSION_IDS).toContain(UNPACKED_EXTENSION_ID);
+    expect(DEFAULT_EXTENSION_IDS).toContain(STORE_EXTENSION_ID);
   });
 
   it("accepts several ids so a published build and an unpacked one coexist", () => {

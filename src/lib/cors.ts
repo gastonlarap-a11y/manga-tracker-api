@@ -27,9 +27,23 @@ const EXTENSION_ID = /^[a-p]{32}$/;
 export const UNPACKED_EXTENSION_ID = "cfjiinlnepkmlaafdclmlpjbmpofplop";
 
 /**
+ * The id the Chrome Web Store assigned on publication. A published build and a
+ * locally loaded one are different extensions as far as the browser is
+ * concerned, so both are defaults: whichever a machine happens to have
+ * installed can reach the backend without anyone editing a config file.
+ */
+export const STORE_EXTENSION_ID = "acopmmaenbjdpcjcaiadcpdniomkikbd";
+
+/** What EXTENSION_IDS falls back to: every id this project publishes under. */
+export const DEFAULT_EXTENSION_IDS: readonly string[] = [
+  UNPACKED_EXTENSION_ID,
+  STORE_EXTENSION_ID,
+];
+
+/**
  * Reads the comma-separated EXTENSION_IDS.
  *
- * Unset or blank means the default, never "no extension at all": an env file
+ * Unset or blank means the defaults, never "no extension at all": an env file
  * that declares the key empty is a missing value, not a decision to lock the
  * browser out. A malformed id throws instead of being skipped — dropping it
  * silently would surface much later as an extension that cannot reach the
@@ -41,7 +55,7 @@ export function parseExtensionIds(raw: string | undefined): readonly string[] {
     .map((id) => id.trim())
     .filter((id) => id !== "");
   if (ids.length === 0) {
-    return [UNPACKED_EXTENSION_ID];
+    return DEFAULT_EXTENSION_IDS;
   }
   for (const id of ids) {
     if (!EXTENSION_ID.test(id)) {
