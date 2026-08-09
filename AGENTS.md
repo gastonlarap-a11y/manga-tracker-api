@@ -12,11 +12,16 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   (plus extra colocated units when needed, e.g. `events/events.bus.ts`)
 - `src/modules/sync/` — optional two-way sync with Azure DocumentDB (`sync.target.ts` is the ONLY
   file allowed to import `mongodb`; `sync.mapper.ts` is pure and driver-free)
-- `scripts/` — operator tools run by hand: `sync:inspect` (what the shared store holds) and
-  `sync:bootstrap` (thin alias of `env:pull --prod`)
+- `scripts/` — operator tools run by hand: `sync:inspect` (what the shared store holds),
+  `sync:bootstrap` (thin alias of `env:pull --prod`) and `package.ts` (builds the shippable
+  tree; the smoke test and the desktop app's release both call it, so the thing CI proves and
+  the thing people download are built by the same code)
 - `deploy/` — deployment and configuration tooling, outside `src/` because it never ships with
   the app: `provision.ts` (Key Vault), `env-push.ts` / `env-pull.ts` (secrets), `deploy.ts` (the
-  one-command publish), `bootstrap-windows.ts` (first-time install on a new Windows machine —
+  one-command publish), `service-cli.ts` (service control as a process — the one piece of
+  `deploy/` that DOES ship, bundled as `service.js`, because the Go desktop app installs the
+  backend by spawning it and reading one JSON object),
+  `bootstrap-windows.ts` (first-time install on a new Windows machine —
   provisions, registers the scheduled task, and builds the sibling dashboard/extension repos;
   `bun run setup:windows`), `lib/` (a `Runner`-injected wrapper per external tool: `az`, plus one
   machine-specific module per OS — `macos.ts` wraps `plutil`/`security`/`launchctl`, `windows.ts`
@@ -38,6 +43,7 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - Dev: `bun run dev` · Test: `bun test` · Single test: `bun test <file>`
 - Lint: `bun run lint` · Format: `bun run format` · Typecheck: `bun run typecheck`
 - Prisma client: `bun run db:generate` · Migrations: `bun run db:migrate`
+- Package: `bun run package -- --out <dir> [--dashboard <dist>]`
 - Deploy: `bun run deploy` (add `--dry-run` to see the steps without touching production)
 - Azure: `bun run deploy:provision` (create the vault) · `bun run env:push` / `bun run env:pull`
 - Inspect config: `bun run env:show` (every profile + drift on disk; read-only, no network)
@@ -104,6 +110,14 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `GET /health` answers `{status, service}`. The `service` string is a contract, not decoration:
   a client that discovers the backend by probing loopback ports uses it to tell this process from
   anything else answering 200 on the same machine.
+- **The shippable package must carry the dashboard build.** `src/index.ts` serves `/` from
+  `./public`, so a package without it answers 404 on the very page the desktop app's window
+  loads — while `/health` and `/api/*` keep passing, which is exactly how it went unnoticed.
+  `scripts/package.ts --dashboard <dist>` puts it there and the smoke test now asserts `/`
+  returns the dashboard and that its assets resolve.
+- `deploy/service-cli.ts` is the only part of `deploy/` that ships. Its adapter is a parameter
+  rather than `process.platform`, so the suite exercises both platforms from either — and so no
+  test can overwrite the LaunchAgent of whoever runs it.
 - `test-setup.ts` deletes `MONGODB_URL` before anything imports `config.ts`. The suite must be
   hermetic by construction, not because a developer's `.env` happens to lack the credential —
   a `POST /sync/now` from a test run is a real write into the shared store, and events there

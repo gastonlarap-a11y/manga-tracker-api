@@ -1,23 +1,22 @@
-# Proves the backend can ship as a self-contained tree — a bundled server, the
-# libSQL native driver and the migrations — on the two systems the desktop app
-# targets.
+# Proves the backend can ship as a self-contained tree on the two systems the
+# desktop app targets.
 #
-# It is deliberately not a unit test: it assembles the tree an installer would
-# ship, puts it OUTSIDE the repository, and starts it there with nothing else
+# It is deliberately not a unit test: it builds the tree an installer ships,
+# puts it OUTSIDE the repository, and starts it there with nothing else
 # available. No checkout beside it, no Prisma CLI, no `bun install` at run time,
 # no pre-existing database. Green here means a machine that has never seen this
 # project can run the server.
 #
-# Why a bundle rather than the source tree plus node_modules: `bun install
-# --production` still weighs ~360 MB, because @prisma/client pulls in Prisma
-# Studio (React and all), the CLI and the TypeScript compiler — none of which
-# the server imports. Bundling keeps only what is reachable from src/index.ts
-# and brings the package down to ~19 MB. @libsql stays external: it loads a
-# platform-specific .node binary that cannot be bundled.
+# The tree itself is built by `scripts/package.ts`, not by steps written here:
+# the desktop app's release workflow needs the identical tree, and the same
+# logic in two repositories' YAML is a promise that they will drift.
 #
-# The check that matters is /api/library, not /health: it goes through Prisma,
-# the libSQL adapter and the SQLite file, so it fails if the native driver did
-# not come along or the migrations did not run.
+# Three requests, and each one fails for a different reason:
+#   /health      — the process is up at all
+#   /api/library — Prisma, the libSQL native driver and the migrations
+#   /            — the dashboard build. This one is here because it was missing:
+#                  the package had no public/ and answered 404 on the very page
+#                  the desktop app's window loads, while the other two passed.
 name: Package smoke test
 
 on:
@@ -41,12 +40,21 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     # bash everywhere, Windows included (Git Bash ships on the runner), so the
-    # packaging steps are written once instead of once per platform.
+    # steps are written once instead of once per platform.
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v5
+
+      # The dashboard is a sibling repository and the server serves its build
+      # from ./public. Cloned at main: this proves the two fit together, and a
+      # release pins the version instead.
+      - name: Check out the dashboard
+        uses: actions/checkout@v5
+        with:
+          repository: gastonlarap-a11y/manga-tracker-dashboard
+          path: dashboard
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -62,33 +70,17 @@ jobs:
         env:
           DATABASE_URL: "file:./build.db"
 
+      - name: Build the dashboard
+        working-directory: dashboard
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
       - name: Assemble the shippable package
         run: |
           set -euo pipefail
           PKG="${RUNNER_TEMP}/package"
-          rm -rf "$PKG"
-          mkdir -p "$PKG"
-
-          # The server, as one file. Everything unreachable from the entry
-          # point is dropped.
-          bun build src/index.ts --target=bun --outdir "$PKG" --external "@libsql/*"
-
-          # The migrations travel as data: the server applies them on startup.
-          cp -R prisma/migrations "$PKG/migrations"
-
-          # Only the native driver is installed, and Bun resolves its own
-          # dependency tree — listing them by hand is how you find out at run
-          # time that one is missing.
-          cat > "$PKG/package.json" <<'JSON'
-          {
-            "name": "manga-tracker-runtime",
-            "private": true,
-            "type": "module",
-            "dependencies": { "@prisma/adapter-libsql": "^7.8.0" }
-          }
-          JSON
-          (cd "$PKG" && bun install --production --no-save)
-
+          bun run package -- --out "$PKG" --dashboard dashboard/dist
           echo "PKG=$PKG" >> "$GITHUB_ENV"
           echo "package size: $(du -sh "$PKG" | cut -f1)"
 
@@ -153,6 +145,38 @@ jobs:
           case "$after" in
             *"Smoke Test"*) echo "the packaged server reads and writes its database" ;;
             *) echo "::error::the reading was not persisted"; exit 1 ;;
+          esac
+
+      - name: Serve the dashboard, which is what the desktop window loads
+        run: |
+          set -euo pipefail
+          # This is the check that was missing. Without public/ in the package
+          # the server answers 404 here while /health and /api keep passing,
+          # so the app's window would open on an error page.
+          root=$(curl -fsS http://127.0.0.1:5199/)
+          case "$root" in
+            *"<title>Manga Tracker</title>"*) echo "GET / serves the dashboard" ;;
+            *) echo "::error::GET / did not return the dashboard"; echo "$root" | head -5; exit 1 ;;
+          esac
+
+          # And its assets resolve: an index.html whose scripts 404 is a blank
+          # window, which looks exactly like a working one until you use it.
+          asset=$(printf '%s' "$root" | grep -o '/assets/index-[A-Za-z0-9_-]*\.js' | head -1)
+          test -n "$asset"
+          curl -fsS -o /dev/null "http://127.0.0.1:5199${asset}"
+          echo "asset ${asset} resolves"
+
+      - name: Run the service CLI from the package
+        run: |
+          set -euo pipefail
+          cd "$PKG"
+          # It ships beside the server and the desktop app spawns it, so it has
+          # to be a working program in the package, not only in the repository.
+          status=$(bun run service.js status)
+          echo "service.js status -> $status"
+          case "$status" in
+            *'"ok":true'*) echo "the packaged service CLI answers" ;;
+            *) echo "::error::service.js did not answer"; exit 1 ;;
           esac
 
       - name: Stop the server
