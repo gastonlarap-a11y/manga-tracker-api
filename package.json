@@ -8,6 +8,7 @@
     "typecheck": "tsc --noEmit",
     "db:generate": "bunx --bun prisma generate",
     "db:migrate": "bunx --bun prisma migrate dev",
+    "package": "bun run scripts/package.ts",
     "sync:inspect": "bun run scripts/inspect-replica.ts",
     "sync:bootstrap": "bun run scripts/bootstrap-credentials.ts",
     "deploy": "bun run deploy/deploy.ts",

@@ -9,6 +9,23 @@ import * as macos from "./macos";
 import type { Runner } from "./run";
 import * as windows from "./windows";
 
+export interface InstallServiceOptions {
+  /** Absolute path of the interpreter that runs the backend. */
+  readonly bunPath: string;
+  /** What it runs, relative to `workingDirectory`. */
+  readonly entry: string;
+  readonly workingDirectory: string;
+}
+
+export interface InstallServiceOutcome {
+  /**
+   * False when the definition registered but this account cannot start or stop
+   * it afterwards — the Windows ACL case. The install still works; it is the
+   * caller's job to say so rather than to pretend everything is fine.
+   */
+  readonly userCanControlIt: boolean;
+}
+
 export interface PlatformAdapter {
   /**
    * The platform whose command names this adapter speaks — `which` vs `where`,
@@ -35,6 +52,16 @@ export interface PlatformAdapter {
   readSecret(run: Runner): Promise<string | null>;
   writeSecret(run: Runner, value: string): Promise<boolean>;
   reloadService(run: Runner): Promise<void>;
+  /**
+   * Creates the service definition on a machine that has never had one. Every
+   * other method here edits something that already exists — which held while a
+   * plist was copied by hand once, and stops holding when an installer runs on
+   * someone else's computer.
+   */
+  installService(
+    run: Runner,
+    options: InstallServiceOptions,
+  ): Promise<InstallServiceOutcome>;
 }
 
 export const macosAdapter: PlatformAdapter = {
@@ -52,6 +79,12 @@ export const macosAdapter: PlatformAdapter = {
   readSecret: (run) => macos.readKeychain(run),
   writeSecret: (run, value) => macos.writeKeychain(run, value),
   reloadService: (run) => macos.reloadService(run),
+  // launchd agents live in the user's own domain, so nothing here needs
+  // elevation and the account can always control what it registered.
+  installService: async (_run, options) => {
+    await macos.writePlist(options);
+    return { userCanControlIt: true };
+  },
 };
 
 export const windowsAdapter: PlatformAdapter = {
@@ -69,6 +102,7 @@ export const windowsAdapter: PlatformAdapter = {
   readSecret: (run) => windows.readSecret(run),
   writeSecret: (run, value) => windows.writeSecret(run, value),
   reloadService: (run) => windows.reloadService(run),
+  installService: (run, options) => windows.installTask(run, options),
 };
 
 export const platform: PlatformAdapter =
