@@ -15,7 +15,7 @@ import { startSyncScheduler } from "./modules/sync/sync.scheduler";
 // Before anything opens a connection: a server that answers /health and then
 // fails on the first query is worse than one that refuses to start. Idempotent,
 // so the usual case (already up to date) is a read and nothing else.
-const migration = applyMigrations(config.databaseUrl);
+const migration = applyMigrations(config.databaseUrl, config.migrationsDir);
 if (migration.applied.length > 0) {
   console.info(
     `[db] applied ${migration.applied.length} migration(s): ${migration.applied.join(", ")}`,

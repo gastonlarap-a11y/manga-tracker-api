@@ -1,0 +1,167 @@
+# Proves the backend can ship as a self-contained tree — a bundled server, the
+# libSQL native driver and the migrations — on the two systems the desktop app
+# targets.
+#
+# It is deliberately not a unit test: it assembles the tree an installer would
+# ship, puts it OUTSIDE the repository, and starts it there with nothing else
+# available. No checkout beside it, no Prisma CLI, no `bun install` at run time,
+# no pre-existing database. Green here means a machine that has never seen this
+# project can run the server.
+#
+# Why a bundle rather than the source tree plus node_modules: `bun install
+# --production` still weighs ~360 MB, because @prisma/client pulls in Prisma
+# Studio (React and all), the CLI and the TypeScript compiler — none of which
+# the server imports. Bundling keeps only what is reachable from src/index.ts
+# and brings the package down to ~19 MB. @libsql stays external: it loads a
+# platform-specific .node binary that cannot be bundled.
+#
+# The check that matters is /api/library, not /health: it goes through Prisma,
+# the libSQL adapter and the SQLite file, so it fails if the native driver did
+# not come along or the migrations did not run.
+name: Package smoke test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      # One platform failing must not hide the other's result.
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # bash everywhere, Windows included (Git Bash ships on the runner), so the
+    # packaging steps are written once instead of once per platform.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Generated into src/generated (gitignored): it gets bundled in, so the
+      # target machine never runs the Prisma CLI.
+      - name: Generate Prisma client
+        run: bun run db:generate
+        env:
+          DATABASE_URL: "file:./build.db"
+
+      - name: Assemble the shippable package
+        run: |
+          set -euo pipefail
+          PKG="${RUNNER_TEMP}/package"
+          rm -rf "$PKG"
+          mkdir -p "$PKG"
+
+          # The server, as one file. Everything unreachable from the entry
+          # point is dropped.
+          bun build src/index.ts --target=bun --outdir "$PKG" --external "@libsql/*"
+
+          # The migrations travel as data: the server applies them on startup.
+          cp -R prisma/migrations "$PKG/migrations"
+
+          # Only the native driver is installed, and Bun resolves its own
+          # dependency tree — listing them by hand is how you find out at run
+          # time that one is missing.
+          cat > "$PKG/package.json" <<'JSON'
+          {
+            "name": "manga-tracker-runtime",
+            "private": true,
+            "type": "module",
+            "dependencies": { "@prisma/adapter-libsql": "^7.8.0" }
+          }
+          JSON
+          (cd "$PKG" && bun install --production --no-save)
+
+          echo "PKG=$PKG" >> "$GITHUB_ENV"
+          echo "package size: $(du -sh "$PKG" | cut -f1)"
+
+      - name: Verify no personal infrastructure leaked into the package
+        run: |
+          set -euo pipefail
+          if grep -rIl "kv-mangatracker\|rg-proyectos-personales" "$PKG" 2>/dev/null; then
+            echo "::error::Azure resource names leaked into the package"
+            exit 1
+          fi
+          echo "clean: no personal Azure resource names in the package"
+
+      - name: Start the server from the package
+        run: |
+          set -euo pipefail
+          cd "$PKG"
+          # A database that does not exist yet: the server has to create and
+          # migrate it on its own, which is the whole point.
+          DATABASE_URL="file:${RUNNER_TEMP}/smoke.db" \
+          PORT=5199 \
+          MIGRATIONS_DIR="$PKG/migrations" \
+            bun run index.js > "${RUNNER_TEMP}/server.log" 2>&1 &
+          echo $! > "${RUNNER_TEMP}/server.pid"
+
+          for attempt in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:5199/health > /dev/null 2>&1; then
+              echo "healthy after ${attempt}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::server never became healthy"
+          cat "${RUNNER_TEMP}/server.log"
+          exit 1
+
+      - name: Confirm it migrated the database itself
+        run: |
+          set -euo pipefail
+          grep -q "applied .* migration" "${RUNNER_TEMP}/server.log" || {
+            echo "::error::the server did not report applying migrations"
+            cat "${RUNNER_TEMP}/server.log"
+            exit 1
+          }
+          cat "${RUNNER_TEMP}/server.log"
+
+      - name: Read and write through Prisma, libSQL and SQLite
+        run: |
+          set -euo pipefail
+          # An empty library is the expected answer on a fresh database; a 500
+          # here means the migrations did not run or the native driver is
+          # missing from the package.
+          body=$(curl -fsS http://127.0.0.1:5199/api/library)
+          echo "GET /api/library -> $body"
+          test "$body" = "[]"
+
+          curl -fsS -X POST http://127.0.0.1:5199/api/events \
+            -H 'content-type: application/json' \
+            -d '{"mangaName":"Smoke Test","chapterLabel":"Cap. 1","sourceUrl":"https://example.com/smoke/1"}' \
+            > /dev/null
+          after=$(curl -fsS http://127.0.0.1:5199/api/library)
+          echo "after one reading -> $after"
+          case "$after" in
+            *"Smoke Test"*) echo "the packaged server reads and writes its database" ;;
+            *) echo "::error::the reading was not persisted"; exit 1 ;;
+          esac
+
+      - name: Stop the server
+        if: always()
+        run: |
+          if [ -f "${RUNNER_TEMP}/server.pid" ]; then
+            kill "$(cat "${RUNNER_TEMP}/server.pid")" 2>/dev/null || true
+          fi
+
+      - name: Server log
+        if: failure()
+        run: cat "${RUNNER_TEMP}/server.log" || true

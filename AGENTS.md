@@ -61,7 +61,11 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   `GET /api/sync/status`, never propagated into a request handler.
 - A new environment variable is declared in `deploy/lib/env.ts` (`ENV_MANIFEST`) as `secret`,
   `profile` or `machine`, and read in `src/config.ts`. Nothing else needs to change: push, pull
-  and deploy all derive their behaviour from that classification. There is deliberately no
+  and deploy all derive their behaviour from that classification.
+  - The one exception is `MIGRATIONS_DIR`, which is deliberately **not** in the manifest: it is
+    not a secret, has no dev/prod value and is not derived per machine. A checkout must leave it
+    unset (the default next to the source is correct); only the packaged app sets it, because
+    there the server is a single bundled file with no `src/` tree above it to walk up from. There is deliberately no
   per-environment file tree: Bun only auto-loads `.env`, `.env.<NODE_ENV>` and `.env.local` from
   the cwd, and `.gitignore` covers `.env*` but would not cover a nested `env/` directory.
 - The Windows scheduled task is `LogonType=S4U` **plus an `icacls` grant afterwards**, and both

@@ -14,7 +14,14 @@ permissions:
 
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    # AGENTS.md requires the suite to pass on macOS, Windows and Linux, and
+    # `bun run deploy` gates on it on every machine — but CI only ever proved
+    # Linux. The two systems the app actually runs on were never checked.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     env:
       DATABASE_URL: "file:./dev.db"
     steps:
