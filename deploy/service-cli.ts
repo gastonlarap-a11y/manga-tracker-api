@@ -17,8 +17,15 @@
  *   service-cli install --app-dir <dir> --data-dir <dir> [--port <n>]
  *   service-cli status
  *   service-cli restart
- *   service-cli set-sync --url <mongodb-url> [--db <name>]
+ *   service-cli set-sync [--db <name>]      (connection string on stdin)
+ *   service-cli use-stored-sync [--db <name>]
  *   service-cli clear-sync
+ *   service-cli stop
+ *
+ * `set-sync` reads the connection string from **stdin**, never from a flag.
+ * This repo already holds that rule for `az` — a secret on the command line is
+ * readable by every process on the machine through `ps` — and the credential
+ * the desktop app forwards is exactly the kind of thing that rule is for.
  */
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -29,6 +36,17 @@ import { type Runner, spawnRunner } from "./lib/run";
 
 /** Every reply is one JSON object, so the caller never has to guess. */
 type Reply = Record<string, unknown>;
+
+/**
+ * Reads the credential the caller is passing in.
+ *
+ * A parameter for the same reason `Runner` and `PlatformAdapter` are: the suite
+ * has to drive `set-sync` without a process behind it, and a test that had to
+ * write to a real stdin would be testing Bun, not this.
+ */
+export type StdinReader = () => Promise<string>;
+
+const defaultReadStdin: StdinReader = () => Bun.stdin.text();
 
 export function parseArgs(argv: readonly string[]): {
   command: string;
@@ -184,8 +202,11 @@ async function setSync(
   run: Runner,
   adapter: PlatformAdapter,
   options: Map<string, string>,
+  url: string,
 ): Promise<Reply> {
-  const url = required(options, "url");
+  if (url === "") {
+    throw new Error("no connection string was provided on stdin");
+  }
   const db = options.get("db") || "mangatracker";
   if (!(await adapter.writeSecret(run, url))) {
     throw new Error(
@@ -264,6 +285,7 @@ export async function runCommand(
   run: Runner,
   argv: readonly string[],
   adapter: PlatformAdapter = platform,
+  readStdin: StdinReader = defaultReadStdin,
 ): Promise<Reply> {
   const { command, options } = parseArgs(argv);
   switch (command) {
@@ -275,7 +297,9 @@ export async function runCommand(
       await adapter.reloadService(run);
       return { ok: true, restarted: adapter.serviceLabel };
     case "set-sync":
-      return await setSync(run, adapter, options);
+      // Read lazily, inside the one case that needs it: every other command
+      // would otherwise block waiting for a stdin nobody is going to write.
+      return await setSync(run, adapter, options, (await readStdin()).trim());
     case "use-stored-sync":
       return await useStoredSync(run, adapter, options);
     case "clear-sync":
@@ -287,7 +311,8 @@ export async function runCommand(
       return { ok: true, stopped: adapter.serviceLabel };
     default:
       throw new Error(
-        `unknown command "${command}". Expected install, status, restart, set-sync or clear-sync.`,
+        `unknown command "${command}". Expected install, status, restart, ` +
+          `set-sync, use-stored-sync, clear-sync or stop.`,
       );
   }
 }

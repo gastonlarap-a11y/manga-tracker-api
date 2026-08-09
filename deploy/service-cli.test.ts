@@ -9,7 +9,18 @@ import {
   firstFreePort,
   parseArgs,
   runCommand,
+  type StdinReader,
 } from "./service-cli";
+
+/**
+ * The connection string `set-sync` will read. A function rather than a value
+ * because that is the seam: the real one waits on a process's stdin, and a test
+ * that had to write to one would be exercising Bun rather than this file.
+ */
+const onStdin =
+  (value: string): StdinReader =>
+  () =>
+    Promise.resolve(value);
 
 /**
  * A recording adapter, never the real one. `macosAdapter.installService` writes
@@ -318,8 +329,9 @@ describe("status", () => {
       );
       await runCommand(
         runner(),
-        ["set-sync", "--url", "mongodb://user:secret@host/db"],
+        ["set-sync"],
         fake.adapter,
+        onStdin("mongodb://user:secret@host/db"),
       );
 
       const reply = await runCommand(runner(), ["status"], fake.adapter);
@@ -336,8 +348,9 @@ describe("sync", () => {
 
     await runCommand(
       runner(),
-      ["set-sync", "--url", "mongodb://host/db", "--db", "mangas"],
+      ["set-sync", "--db", "mangas"],
       fake.adapter,
+      onStdin("mongodb://host/db"),
     );
 
     expect(fake.secret).toBe("mongodb://host/db");
@@ -350,8 +363,9 @@ describe("sync", () => {
 
     await runCommand(
       runner(),
-      ["set-sync", "--url", "mongodb://host/db"],
+      ["set-sync"],
       fake.adapter,
+      onStdin("mongodb://host/db"),
     );
 
     expect(fake.written.get("MONGODB_DB")).toBe("mangatracker");
@@ -363,8 +377,9 @@ describe("sync", () => {
     const fake = fakeAdapter("darwin");
     await runCommand(
       runner(),
-      ["set-sync", "--url", "mongodb://host/db"],
+      ["set-sync"],
       fake.adapter,
+      onStdin("mongodb://host/db"),
     );
 
     const reply = await runCommand(runner(), ["clear-sync"], fake.adapter);
@@ -373,12 +388,29 @@ describe("sync", () => {
     expect(fake.written.get("MONGODB_URL")).toBe("");
   });
 
-  it("refuses a set-sync with no URL", async () => {
+  it("refuses a set-sync with nothing on stdin", async () => {
     const fake = fakeAdapter("darwin");
 
     await expect(
-      runCommand(runner(), ["set-sync"], fake.adapter),
-    ).rejects.toThrow(/--url/);
+      runCommand(runner(), ["set-sync"], fake.adapter, onStdin("  \n")),
+    ).rejects.toThrow(/no connection string/);
+  });
+
+  it("will not take the credential from a flag, however it is offered", async () => {
+    // The point of the whole change: a secret on the command line is readable
+    // by every process on the machine through `ps`. Closing the channel means
+    // the flag has to stop working, not merely stop being used.
+    const fake = fakeAdapter("darwin");
+
+    await expect(
+      runCommand(
+        runner(),
+        ["set-sync", "--url", "mongodb://user:hunter2@host/db"],
+        fake.adapter,
+        onStdin(""),
+      ),
+    ).rejects.toThrow(/no connection string/);
+    expect(fake.secret).toBeNull();
   });
 });
 
@@ -404,8 +436,9 @@ describe("the credential this machine already had", () => {
       );
       await runCommand(
         runner(),
-        ["set-sync", "--url", "mongodb://user:hunter2@host/db"],
+        ["set-sync"],
         fake.adapter,
+        onStdin("mongodb://user:hunter2@host/db"),
       );
       // A fresh install: the configuration loses the URL, the keystore keeps it.
       await runCommand(runner(), ["clear-sync"], fake.adapter);
@@ -424,8 +457,9 @@ describe("the credential this machine already had", () => {
     const fake = fakeAdapter("darwin");
     await runCommand(
       runner(),
-      ["set-sync", "--url", "mongodb://host/db"],
+      ["set-sync"],
       fake.adapter,
+      onStdin("mongodb://host/db"),
     );
     await runCommand(runner(), ["clear-sync"], fake.adapter);
 
@@ -482,8 +516,27 @@ describe("unknown commands", () => {
   it("names what it expected instead of failing silently", async () => {
     const fake = fakeAdapter("darwin");
 
-    await expect(
-      runCommand(runner(), ["frobnicate"], fake.adapter),
-    ).rejects.toThrow(/install, status, restart, set-sync or clear-sync/);
+    // Every command it accepts, not a list that drifts: the old message named
+    // five of the seven, and the two it left out were the two the desktop app
+    // had most recently learned to send.
+    const message = await runCommand(
+      runner(),
+      ["frobnicate"],
+      fake.adapter,
+    ).then(
+      () => "",
+      (error: unknown) => String(error),
+    );
+    for (const command of [
+      "install",
+      "status",
+      "restart",
+      "set-sync",
+      "use-stored-sync",
+      "clear-sync",
+      "stop",
+    ]) {
+      expect(message).toContain(command);
+    }
   });
 });
