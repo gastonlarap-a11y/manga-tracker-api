@@ -18,9 +18,12 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   the thing people download are built by the same code)
 - `deploy/` — deployment and configuration tooling, outside `src/` because it never ships with
   the app: `provision.ts` (Key Vault), `env-push.ts` / `env-pull.ts` (secrets), `deploy.ts` (the
-  one-command publish), `service-cli.ts` (service control as a process — the one piece of
-  `deploy/` that DOES ship, bundled as `service.js`, because the Go desktop app installs the
-  backend by spawning it and reading one JSON object),
+  one-command publish), `service-cli.ts` (service control as a process — bundled as
+  `service.js`, because the Go desktop app installs the backend by spawning it and reading one
+  JSON object) and `launcher.ts` (bundled as `launch.js`, what the installed service actually
+  starts: it reads the sync credential from the system keystore and serves `index.js` in the
+  same process, so the credential never lands in a file) — the two pieces of `deploy/` that DO
+  ship,
   `bootstrap-windows.ts` (first-time install on a new Windows machine —
   provisions, registers the scheduled task, and builds the sibling dashboard/extension repos;
   `bun run setup:windows`), `lib/` (a `Runner`-injected wrapper per external tool: `az`, plus one
@@ -115,9 +118,31 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   loads — while `/health` and `/api/*` keep passing, which is exactly how it went unnoticed.
   `scripts/package.ts --dashboard <dist>` puts it there and the smoke test now asserts `/`
   returns the dashboard and that its assets resolve.
-- `deploy/service-cli.ts` is the only part of `deploy/` that ships. Its adapter is a parameter
-  rather than `process.platform`, so the suite exercises both platforms from either — and so no
-  test can overwrite the LaunchAgent of whoever runs it.
+- `deploy/service-cli.ts` and `deploy/launcher.ts` are the two parts of `deploy/` that ship.
+  Their adapter is a parameter rather than `process.platform`, so the suite exercises both
+  platforms from either — and so no test can overwrite the LaunchAgent of whoever runs it.
+- **The service starts `launch.js`, not `index.js`.** The launcher reads the sync credential out
+  of the system keystore and puts it in the server's environment in memory, so the service's own
+  configuration never holds it. It serves in the same process — `Bun.serve(indexModule.default)`
+  — because Bun starts a server from an *entrypoint's* default export and only an entrypoint's;
+  a module reached through `import()` is just a module. One process, and the PID the service
+  manager watches is the one serving.
+  - **`MONGODB_URL` in the configuration is a three-valued thing**: empty (off), `keystore` (on,
+    value in the keystore), or a real URL (older installs, and the fallback below). A sentinel
+    rather than "empty means look in the keystore", because `clear-sync` blanks the
+    configuration and **deliberately leaves the keystore alone** — so that rule would turn sync
+    back on by itself at the next login, minutes after someone switched it off.
+  - **Whether a service can read its own keystore at startup is not knowable in advance.** A
+    Windows task running as S4U has no password behind it, and user-scope DPAPI derives its key
+    from one. So the app tries the keystore, watches whether sync comes up, and calls
+    `pin-config-secret` if it did not — back to plaintext in a file locked to the account, which
+    is what every install did until now. A sync that does not run is worse.
+  - `repair` re-registers the service definition, preserving the port and the sync settings.
+    `restart` only reloads what is already registered, so without this a machine installed
+    before the launcher existed would start `index.js` forever. `Prepare` calls it after an
+    update; that is the whole migration.
+  - `src/` knows nothing about any of this. `config.ts` goes on reading `Bun.env.MONGODB_URL`,
+    and no platform code crosses into the server.
 - **`set-sync` reads the connection string from stdin, and there is no flag that will take it.**
   Same rule as `az` above: an argument is readable by every process on the machine through `ps`
   for as long as the command runs, and what the desktop app forwards here is a cluster password.

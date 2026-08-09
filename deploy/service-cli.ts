@@ -33,6 +33,7 @@ import { DEFAULT_EXTENSION_IDS } from "../src/lib/cors";
 import { candidatePorts, parsePort } from "../src/lib/port";
 import { type PlatformAdapter, platform } from "./lib/platform";
 import { type Runner, spawnRunner } from "./lib/run";
+import { KEYSTORE_SENTINEL } from "./lib/sync-secret";
 
 /** Every reply is one JSON object, so the caller never has to guess. */
 type Reply = Record<string, unknown>;
@@ -157,6 +158,13 @@ async function writeEnvironment(
   }
 }
 
+/**
+ * `launch.js`, not `index.js`: the launcher reads the credential out of the
+ * system keystore and puts it in the server's environment, so the service's own
+ * configuration never has to hold it. See deploy/launcher.ts.
+ */
+const SERVICE_ENTRY = "launch.js";
+
 async function install(
   run: Runner,
   adapter: PlatformAdapter,
@@ -175,7 +183,7 @@ async function install(
   // written with `plutil -replace`, which fails on a plist that does not exist.
   const outcome = await adapter.installService(run, {
     bunPath: join(appDir, adapter.os === "win32" ? "bun.exe" : "bun"),
-    entry: "index.js",
+    entry: SERVICE_ENTRY,
     workingDirectory: appDir,
   });
 
@@ -194,6 +202,60 @@ async function install(
   };
 }
 
+/**
+ * Rewrites the service definition of a machine that already has one.
+ *
+ * `restart` only reloads; it never touches what is registered. So a machine
+ * installed before the launcher existed would go on starting `index.js`
+ * forever, and `set-sync` would hand it a configuration it cannot read. This is
+ * what the app calls after an update, and it is the whole migration.
+ *
+ * The sync settings are read first and written back afterwards, because
+ * registering the definition is what wipes them: `writePlist` creates the plist
+ * with an empty environment on purpose, so that exactly one code path writes
+ * values into it. Without this, updating would quietly switch sync off.
+ */
+async function repair(
+  run: Runner,
+  adapter: PlatformAdapter,
+  options: Map<string, string>,
+): Promise<Reply> {
+  const appDir = required(options, "app-dir");
+  const dataDir = required(options, "data-dir");
+
+  const existingPort = await adapter.readConfigEnv(run, "PORT");
+  const preserved = new Map<string, string>();
+  for (const key of ["MONGODB_URL", "MONGODB_DB"]) {
+    const value = await adapter.readConfigEnv(run, key);
+    if (value !== null && value !== "") {
+      preserved.set(key, value);
+    }
+  }
+
+  // The port is kept as it was: the extension caches it, and the desktop app
+  // has it open in a window right now.
+  const port =
+    existingPort !== null && existingPort !== ""
+      ? parsePort(existingPort)
+      : await firstFreePort();
+
+  await adapter.installService(run, {
+    bunPath: join(appDir, adapter.os === "win32" ? "bun.exe" : "bun"),
+    entry: SERVICE_ENTRY,
+    workingDirectory: appDir,
+  });
+  await writeEnvironment(run, adapter, environmentFor(appDir, dataDir, port));
+  await writeEnvironment(run, adapter, preserved);
+  await adapter.reloadService(run);
+
+  return {
+    ok: true,
+    port,
+    repaired: adapter.serviceLabel,
+    syncConfigured: preserved.has("MONGODB_URL"),
+  };
+}
+
 async function status(run: Runner, adapter: PlatformAdapter): Promise<Reply> {
   const installed = await adapter.configExists();
   const port = installed ? await adapter.readConfigEnv(run, "PORT") : null;
@@ -209,6 +271,12 @@ async function status(run: Runner, adapter: PlatformAdapter): Promise<Reply> {
   const syncDb = installed
     ? await adapter.readConfigEnv(run, "MONGODB_DB")
     : null;
+  // The configuration says whether sync is on; the value itself may be the
+  // sentinel, in which case the address to display is the keystore's.
+  const secretInConfig =
+    syncUrl !== null && syncUrl !== "" && syncUrl !== KEYSTORE_SENTINEL;
+  const effective = syncUrl === KEYSTORE_SENTINEL ? stored : syncUrl;
+
   return {
     ok: true,
     installed,
@@ -216,10 +284,13 @@ async function status(run: Runner, adapter: PlatformAdapter): Promise<Reply> {
     // Whether it is configured, never the credential itself.
     syncConfigured: syncUrl !== null && syncUrl !== "",
     hasStoredCredential: stored !== null && stored !== "",
+    // True while the credential is still sitting in the service's own
+    // configuration in plaintext, which is what the launcher exists to end.
+    secretInConfig,
     // Where it points, so the app can say what it is synchronising against
     // instead of showing an empty form to someone who is already connected.
     // Host and database only — the user and the password stay here.
-    syncHost: hostOf(syncUrl),
+    syncHost: hostOf(effective),
     syncDb: syncDb ?? "",
     configPath: adapter.configPath,
     service: adapter.serviceLabel,
@@ -245,16 +316,49 @@ async function setSync(
       `could not store the credential in the ${adapter.secretCacheLabel}`,
     );
   }
+  // The sentinel, not the value: the credential goes to the keystore and the
+  // configuration only records that sync is on and where to look. The launcher
+  // reads it back at startup. If this machine's service cannot do that — a
+  // Windows task running as S4U may not be able to unwrap a DPAPI blob — the
+  // app notices that sync did not come up and calls `pin-config-secret`, which
+  // puts the value back here.
   await writeEnvironment(
     run,
     adapter,
     new Map([
-      ["MONGODB_URL", url],
+      ["MONGODB_URL", KEYSTORE_SENTINEL],
       ["MONGODB_DB", db],
     ]),
   );
   await adapter.reloadService(run);
-  return { ok: true, syncConfigured: true, db };
+  return { ok: true, syncConfigured: true, secretInConfig: false, db };
+}
+
+/**
+ * Writes the credential into the service's configuration after all.
+ *
+ * The fallback for a machine whose service cannot read its own keystore at
+ * startup. Nothing about that is knowable in advance — it depends on how the
+ * session was created — so it is discovered the only honest way: try the
+ * keystore, see whether sync comes up, and come back here if it did not.
+ *
+ * Plaintext in a file locked to this account, which is what every install did
+ * until now. Worse than the keystore, and far better than a sync that does not
+ * run.
+ */
+async function pinConfigSecret(
+  run: Runner,
+  adapter: PlatformAdapter,
+): Promise<Reply> {
+  const stored = await adapter.readSecret(run);
+  if (stored === null || stored === "") {
+    throw new Error(
+      `no credential is stored in the ${adapter.secretCacheLabel} on this machine`,
+    );
+  }
+  await writeEnvironment(run, adapter, new Map([["MONGODB_URL", stored]]));
+  await adapter.reloadService(run);
+  return { ok: true, syncConfigured: true, secretInConfig: true };
 }
 
 /**
@@ -278,11 +382,13 @@ async function useStoredSync(
     );
   }
   const db = options.get("db") || "mangatracker";
+  // The sentinel, for the same reason as set-sync: the value is already in the
+  // keystore, and the configuration only has to say that sync is on.
   await writeEnvironment(
     run,
     adapter,
     new Map([
-      ["MONGODB_URL", stored],
+      ["MONGODB_URL", KEYSTORE_SENTINEL],
       ["MONGODB_DB", db],
     ]),
   );
@@ -334,6 +440,10 @@ export async function runCommand(
       return await setSync(run, adapter, options, (await readStdin()).trim());
     case "use-stored-sync":
       return await useStoredSync(run, adapter, options);
+    case "pin-config-secret":
+      return await pinConfigSecret(run, adapter);
+    case "repair":
+      return await repair(run, adapter, options);
     case "clear-sync":
       return await clearSync(run, adapter);
     case "stop":
@@ -343,8 +453,9 @@ export async function runCommand(
       return { ok: true, stopped: adapter.serviceLabel };
     default:
       throw new Error(
-        `unknown command "${command}". Expected install, status, restart, ` +
-          `set-sync, use-stored-sync, clear-sync or stop.`,
+        `unknown command "${command}". Expected install, repair, status, ` +
+          `restart, set-sync, use-stored-sync, pin-config-secret, clear-sync ` +
+          `or stop.`,
       );
   }
 }
