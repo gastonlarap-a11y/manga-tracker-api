@@ -1,6 +1,14 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
-import { cpSync, mkdtempSync, readdirSync, rmSync, statSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyMigrations, databaseFileFromUrl } from "./migrate";
@@ -141,8 +149,13 @@ describe("applyMigrations", () => {
     const brokenDir = mkdtempSync(join(tmpdir(), "migrate-broken-"));
     scratchDirs.push(brokenDir);
     const migration = join(brokenDir, "20260101000000_broken");
-    Bun.spawnSync(["mkdir", "-p", migration]);
-    Bun.write(join(migration, "migration.sql"), "THIS IS NOT SQL;");
+    // node:fs, not `mkdir -p` through a shell: `-p` does not exist on Windows,
+    // so spawning it left the directory absent and the test passed vacuously
+    // everywhere except where it mattered. Writes are synchronous for the same
+    // reason the rest of the migrator is — the file must be there on the next
+    // line, not on the next tick.
+    mkdirSync(migration, { recursive: true });
+    writeFileSync(join(migration, "migration.sql"), "THIS IS NOT SQL;");
 
     expect(() => applyMigrations(url, brokenDir)).toThrow(
       /20260101000000_broken/,
