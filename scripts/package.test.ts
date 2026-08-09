@@ -1,12 +1,20 @@
 import { describe, expect, it } from "bun:test";
+import { resolve } from "node:path";
 import { assertSafeOutDir, runtimeManifest } from "./package";
 
-const ROOT = "/home/dev/manga-tracker-api";
+/**
+ * Resolved rather than written as a POSIX literal: on Windows a bare
+ * "/home/dev/..." is not the same string the guard computes, so the fixture
+ * would quietly stop matching and the test would pass while proving nothing.
+ */
+const ROOT = resolve("/home/dev/manga-tracker-api");
 
 describe("assertSafeOutDir", () => {
   it("accepts a build directory of its own", () => {
-    expect(() => assertSafeOutDir("/tmp/package", ROOT)).not.toThrow();
-    expect(() => assertSafeOutDir(`${ROOT}/build/out`, ROOT)).not.toThrow();
+    expect(() => assertSafeOutDir(resolve("/tmp/package"), ROOT)).not.toThrow();
+    expect(() =>
+      assertSafeOutDir(resolve(ROOT, "build/out"), ROOT),
+    ).not.toThrow();
   });
 
   it("refuses to delete the repository", () => {
@@ -17,8 +25,12 @@ describe("assertSafeOutDir", () => {
   });
 
   it("refuses a directory that contains the repository", () => {
-    expect(() => assertSafeOutDir("/home/dev", ROOT)).toThrow(/Refusing/);
-    expect(() => assertSafeOutDir("/", ROOT)).toThrow(/Refusing/);
+    // Containment is tested with `relative`, not a "/"-prefixed string: the
+    // prefix version accepted C:\Users\you on Windows with the repo inside it.
+    expect(() => assertSafeOutDir(resolve(ROOT, ".."), ROOT)).toThrow(
+      /Refusing/,
+    );
+    expect(() => assertSafeOutDir(resolve("/"), ROOT)).toThrow(/Refusing/);
   });
 });
 

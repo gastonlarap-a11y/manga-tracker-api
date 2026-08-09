@@ -19,7 +19,7 @@
  *   bun run package -- --out <dir> [--dashboard <dist-dir>]
  */
 import { cp, mkdir, rm, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, relative, resolve } from "node:path";
 
 const repoRoot = resolve(import.meta.dir, "..");
 
@@ -45,8 +45,16 @@ function parseArgs(argv: readonly string[]): Map<string, string> {
  * should cost nothing.
  */
 export function assertSafeOutDir(out: string, root = repoRoot): void {
-  const target = isAbsolute(out) ? out : resolve(root, out);
-  if (target === root || root.startsWith(`${target}/`) || target === "/") {
+  const base = resolve(root);
+  const target = resolve(base, out);
+  // `relative` rather than a string prefix: a prefix test has to pick a
+  // separator, and picking "/" silently stops catching anything on Windows —
+  // where `--out C:\Users\you` with the repo inside it would have been accepted.
+  const fromTargetToRoot = relative(target, base);
+  const targetContainsRoot =
+    fromTargetToRoot === "" ||
+    (!fromTargetToRoot.startsWith("..") && !isAbsolute(fromTargetToRoot));
+  if (targetContainsRoot) {
     throw new Error(
       `--out ${out} resolves to ${target}, which contains the repository. Refusing to delete it.`,
     );
