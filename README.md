@@ -1,5 +1,10 @@
 # manga-tracker-api
 
+**The companion app of
+[manga-tracker-extension](https://github.com/gastonlarap-a11y/manga-tracker-extension).**
+It runs on your own computer and holds the library; without it the extension has nowhere to
+record to and reports `desconectado`. Start it with the [quick start](#quick-start) below.
+
 Local-first personal manga reading tracker. A REST API built with Bun + Hono 4 + Prisma 7
 (SQLite via the libSQL adapter), consumed by a browser extension (Manifest V3) that records
 reading progress through content-script heuristics, and by a same-origin static web dashboard.
@@ -9,22 +14,30 @@ current state is derived by projection. An optional two-way sync with Azure Docu
 off-site durability and lets several machines share one library — it never sits in the request
 path, so the tracker behaves identically with no network.
 
-## Prerequisites
+## Quick start
 
-- [Bun](https://bun.sh) 1.3+
-
-## Setup
+The only prerequisite is [Bun](https://bun.sh) 1.3+.
 
 ```sh
 bun install
-
-# Environment: create .env with the SQLite file location
 echo 'DATABASE_URL="file:./dev.db"' > .env
-
-# Generate the Prisma client and apply migrations
-bun run db:generate
-bun run db:migrate
+bun run db:generate     # the Prisma client is gitignored, so a fresh clone builds it
+bun run dev             # serves on http://127.0.0.1:5150
 ```
+
+There is no separate migration step: the server applies the migrations in
+`prisma/migrations/` on startup (`src/db/migrate.ts`), creating the database if it does not
+exist. `bun run db:migrate` is for *authoring* a new migration, not for running the app.
+
+Check it answers:
+
+```sh
+curl http://127.0.0.1:5150/health
+# {"status":"ok","service":"manga-tracker-api"}
+```
+
+Then open <http://127.0.0.1:5150/> for the dashboard, or point the extension at it — it
+finds this server by probing ports 5150-5159 and matching that `service` name.
 
 ### Environment variables
 
