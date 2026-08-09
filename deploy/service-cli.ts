@@ -158,12 +158,19 @@ async function status(run: Runner, adapter: PlatformAdapter): Promise<Reply> {
   const syncUrl = installed
     ? await adapter.readConfigEnv(run, "MONGODB_URL")
     : null;
+  // A machine that synced before still holds the credential in its keystore
+  // even when the configuration has none — which is exactly what happens after
+  // a fresh install replaces the service definition. Reporting that it exists
+  // is what lets the app offer to carry it over instead of silently turning
+  // sync off.
+  const stored = await adapter.readSecret(run);
   return {
     ok: true,
     installed,
     port: port === null || port === "" ? null : Number(port),
     // Whether it is configured, never the credential itself.
     syncConfigured: syncUrl !== null && syncUrl !== "",
+    hasStoredCredential: stored !== null && stored !== "",
     configPath: adapter.configPath,
     service: adapter.serviceLabel,
   };
@@ -197,6 +204,47 @@ async function setSync(
   return { ok: true, syncConfigured: true, db };
 }
 
+/**
+ * Turns sync on with the credential this machine already had.
+ *
+ * The installer writes four values and none is personal, which is what keeps
+ * the author's infrastructure out of anyone else's copy. The cost is that
+ * installing over an existing setup switched sync off without saying so. This
+ * is the way back: the credential never left the machine, and reusing it takes
+ * an explicit command.
+ */
+async function useStoredSync(
+  run: Runner,
+  adapter: PlatformAdapter,
+  options: Map<string, string>,
+): Promise<Reply> {
+  const stored = await adapter.readSecret(run);
+  if (stored === null || stored === "") {
+    throw new Error(
+      `no credential is stored in the ${adapter.secretCacheLabel} on this machine`,
+    );
+  }
+  const db = options.get("db") || "mangatracker";
+  await writeEnvironment(
+    run,
+    adapter,
+    new Map([
+      ["MONGODB_URL", stored],
+      ["MONGODB_DB", db],
+    ]),
+  );
+  await adapter.reloadService(run);
+  // The form matters and the caller cannot see the value: a mongodb+srv:// URL
+  // works here and never connects on Windows. Flagged rather than refused —
+  // refusing it would break a setup that works today.
+  return {
+    ok: true,
+    syncConfigured: true,
+    db,
+    usesSrv: stored.startsWith("mongodb+srv://"),
+  };
+}
+
 /** Blank rather than removed: readers treat an empty value as "not configured". */
 async function clearSync(
   run: Runner,
@@ -228,8 +276,15 @@ export async function runCommand(
       return { ok: true, restarted: adapter.serviceLabel };
     case "set-sync":
       return await setSync(run, adapter, options);
+    case "use-stored-sync":
+      return await useStoredSync(run, adapter, options);
     case "clear-sync":
       return await clearSync(run, adapter);
+    case "stop":
+      // Separate from `restart` because an update has to extract over files the
+      // running service holds open — which fails outright on Windows.
+      await adapter.stopService(run);
+      return { ok: true, stopped: adapter.serviceLabel };
     default:
       throw new Error(
         `unknown command "${command}". Expected install, status, restart, set-sync or clear-sync.`,

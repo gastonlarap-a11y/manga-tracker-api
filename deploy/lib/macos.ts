@@ -234,6 +234,34 @@ export interface ReloadOptions {
  * Input/output error` and leaves the service down. It is a race, so it only bites
  * when the service was actually running — which is every real deploy.
  */
+/**
+ * Boots the job out and waits until launchd has really let go of it.
+ *
+ * The wait is the whole point, and it is the same one that makes a hand-typed
+ * `bootout; bootstrap` fail with `Bootstrap failed: 5: Input/output error`:
+ * bootout returns before the teardown finishes. An update that extracts over
+ * the backend while it is still dying has the same problem.
+ */
+export async function stopService(
+  run: Runner,
+  {
+    label = LAUNCHD_LABEL,
+    settleAttempts = 20,
+    settleDelayMs = 250,
+    uid,
+  }: ReloadOptions = {},
+): Promise<void> {
+  // bootout fails when the service is not loaded, which is a fine starting state.
+  await run(["launchctl", "bootout", `${domain(uid)}/${label}`]);
+
+  for (let attempt = 0; attempt < settleAttempts; attempt++) {
+    if (!(await isLoaded(run, label, uid))) {
+      return;
+    }
+    await Bun.sleep(settleDelayMs);
+  }
+}
+
 export async function reloadService(
   run: Runner,
   {
@@ -245,15 +273,7 @@ export async function reloadService(
     uid,
   }: ReloadOptions = {},
 ): Promise<void> {
-  // bootout fails when the service is not loaded, which is a fine starting state.
-  await run(["launchctl", "bootout", `${domain(uid)}/${label}`]);
-
-  for (let attempt = 0; attempt < settleAttempts; attempt++) {
-    if (!(await isLoaded(run, label, uid))) {
-      break;
-    }
-    await Bun.sleep(settleDelayMs);
-  }
+  await stopService(run, { label, settleAttempts, settleDelayMs, uid });
 
   // Teardown can still be settling after `print` stops finding the job, so the
   // bootstrap itself gets a few tries before we call it a failure.

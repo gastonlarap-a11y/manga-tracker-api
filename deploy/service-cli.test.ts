@@ -51,6 +51,9 @@ function fakeAdapter(
     reloadService: async () => {
       steps.push("reload");
     },
+    stopService: async () => {
+      steps.push("stop");
+    },
     installService: async (_run, options) => {
       steps.push("define");
       installed = options;
@@ -376,6 +379,102 @@ describe("sync", () => {
     await expect(
       runCommand(runner(), ["set-sync"], fake.adapter),
     ).rejects.toThrow(/--url/);
+  });
+});
+
+describe("the credential this machine already had", () => {
+  it("reports that one exists, without ever returning it", async () => {
+    // Installing writes four values and none is personal, which is what keeps
+    // the author's infrastructure out of anyone else's copy — and is also why
+    // installing over an existing setup switched sync off silently.
+    await inTempDir(async (dir) => {
+      const fake = fakeAdapter("darwin");
+      await runCommand(
+        runner(),
+        [
+          "install",
+          "--app-dir",
+          "/opt/app",
+          "--data-dir",
+          dir,
+          "--port",
+          "5151",
+        ],
+        fake.adapter,
+      );
+      await runCommand(
+        runner(),
+        ["set-sync", "--url", "mongodb://user:hunter2@host/db"],
+        fake.adapter,
+      );
+      // A fresh install: the configuration loses the URL, the keystore keeps it.
+      await runCommand(runner(), ["clear-sync"], fake.adapter);
+
+      const reply = await runCommand(runner(), ["status"], fake.adapter);
+
+      expect(reply).toMatchObject({
+        syncConfigured: false,
+        hasStoredCredential: true,
+      });
+      expect(JSON.stringify(reply)).not.toContain("hunter2");
+    });
+  });
+
+  it("turns sync back on from the keystore", async () => {
+    const fake = fakeAdapter("darwin");
+    await runCommand(
+      runner(),
+      ["set-sync", "--url", "mongodb://host/db"],
+      fake.adapter,
+    );
+    await runCommand(runner(), ["clear-sync"], fake.adapter);
+
+    const reply = await runCommand(
+      runner(),
+      ["use-stored-sync", "--db", "mangas"],
+      fake.adapter,
+    );
+
+    expect(reply).toMatchObject({
+      ok: true,
+      syncConfigured: true,
+      db: "mangas",
+    });
+    expect(fake.written.get("MONGODB_URL")).toBe("mongodb://host/db");
+    expect(fake.steps.at(-1)).toBe("reload");
+  });
+
+  it("flags a stored srv URL instead of refusing it", async () => {
+    // It works on macOS and never connects on Windows. Refusing would break a
+    // setup that is working today; saying nothing would repeat the problem.
+    const fake = fakeAdapter("darwin", {
+      readSecret: async () => "mongodb+srv://cluster.example.com/db",
+    });
+
+    const reply = await runCommand(runner(), ["use-stored-sync"], fake.adapter);
+
+    expect(reply).toMatchObject({ ok: true, usesSrv: true });
+  });
+
+  it("says so plainly when there is nothing stored", async () => {
+    const fake = fakeAdapter("darwin");
+
+    await expect(
+      runCommand(runner(), ["use-stored-sync"], fake.adapter),
+    ).rejects.toThrow(/no credential is stored/);
+  });
+});
+
+describe("stop", () => {
+  it("stops without starting again", async () => {
+    // An update replaces files the running backend holds open, which on
+    // Windows fails outright while the process is alive.
+    const fake = fakeAdapter("darwin");
+
+    const reply = await runCommand(runner(), ["stop"], fake.adapter);
+
+    expect(reply).toMatchObject({ ok: true });
+    expect(fake.steps).toEqual(["stop"]);
   });
 });
 
