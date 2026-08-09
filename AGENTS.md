@@ -118,6 +118,12 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `deploy/service-cli.ts` is the only part of `deploy/` that ships. Its adapter is a parameter
   rather than `process.platform`, so the suite exercises both platforms from either — and so no
   test can overwrite the LaunchAgent of whoever runs it.
+- **`set-sync` reads the connection string from stdin, and there is no flag that will take it.**
+  Same rule as `az` above: an argument is readable by every process on the machine through `ps`
+  for as long as the command runs, and what the desktop app forwards here is a cluster password.
+  The flag was removed rather than deprecated — a channel that still works is a channel someone
+  uses. `StdinReader` is a parameter for the same reason `Runner` is: a test that had to write
+  to a real stdin would be exercising Bun.
 - `test-setup.ts` deletes `MONGODB_URL` before anything imports `config.ts`. The suite must be
   hermetic by construction, not because a developer's `.env` happens to lack the credential —
   a `POST /sync/now` from a test run is a real write into the shared store, and events there
