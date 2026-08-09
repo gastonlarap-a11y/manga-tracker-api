@@ -118,6 +118,21 @@ export async function buildPackage(options: {
     "--external",
     "@libsql/*",
   ]);
+  // The launcher: what the service actually starts. It reads the credential
+  // out of the system keystore and hands it to the server in memory, so the
+  // service's own configuration never holds it. index.js stays a separate file
+  // — the launcher imports it by a path built at run time, which is why the
+  // bundler leaves it alone.
+  await run([
+    "bun",
+    "build",
+    "deploy/launcher.ts",
+    "--target=bun",
+    "--outfile",
+    join(out, "launch.js"),
+    "--external",
+    "@libsql/*",
+  ]);
 
   // The migrations travel as data: the server applies them on startup.
   await cp(join(repoRoot, "prisma", "migrations"), join(out, "migrations"), {

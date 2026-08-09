@@ -206,7 +206,10 @@ describe("install", () => {
 
       expect(fake.installed).toMatchObject({
         bunPath: join("/opt/app", "bun"),
-        entry: "index.js",
+        // The launcher, not the server: it reads the credential out of the
+        // keystore and hands it to the server in memory, which is what keeps
+        // it out of the service's own configuration file.
+        entry: "launch.js",
         workingDirectory: "/opt/app",
       });
     });
@@ -332,13 +335,17 @@ describe("status", () => {
         runner(),
         ["set-sync"],
         fake.adapter,
-        onStdin("mongodb://user:secret@host/db"),
+        onStdin("mongodb://dbreader93:tr0ub4dor@host/db"),
       );
 
       const reply = await runCommand(runner(), ["status"], fake.adapter);
 
       expect(reply).toMatchObject({ syncConfigured: true });
-      expect(JSON.stringify(reply)).not.toContain("secret");
+      // A distinctive password, not the word "secret": the reply now carries a
+      // field called secretInConfig, and a needle that matches a field name
+      // proves nothing about the values.
+      expect(JSON.stringify(reply)).not.toContain("tr0ub4dor");
+      expect(JSON.stringify(reply)).not.toContain("dbreader93");
     });
   });
 
@@ -423,6 +430,59 @@ describe("sync", () => {
     expect(fake.secret).toBe("mongodb://host/db");
     expect(fake.written.get("MONGODB_DB")).toBe("mangas");
     expect(fake.steps.at(-1)).toBe("reload");
+  });
+
+  it("keeps the credential out of the configuration entirely", async () => {
+    // The point of the launcher. Every install until now wrote the cluster
+    // password into the plist or prod.env in plaintext — locked to the account,
+    // but permanently, and it had to be, because launchd and `bun --env-file`
+    // can only hand a process a string. Now the file records that sync is on
+    // and nothing else.
+    const fake = fakeAdapter("darwin");
+
+    await runCommand(
+      runner(),
+      ["set-sync"],
+      fake.adapter,
+      onStdin("mongodb://dbreader93:tr0ub4dor@host/db"),
+    );
+
+    expect(fake.written.get("MONGODB_URL")).toBe("keystore");
+    for (const value of fake.written.values()) {
+      expect(value).not.toContain("tr0ub4dor");
+    }
+  });
+
+  it("puts the credential back in the configuration when asked", async () => {
+    // For a machine whose service cannot read its own keystore at startup —
+    // a Windows task running as S4U may not be able to unwrap a DPAPI blob.
+    // Nothing about that is knowable in advance, so it is discovered by trying
+    // and coming back here.
+    const fake = fakeAdapter("darwin");
+    await runCommand(
+      runner(),
+      ["set-sync"],
+      fake.adapter,
+      onStdin("mongodb://host/db"),
+    );
+
+    const reply = await runCommand(
+      runner(),
+      ["pin-config-secret"],
+      fake.adapter,
+    );
+
+    expect(reply).toMatchObject({ ok: true, secretInConfig: true });
+    expect(fake.written.get("MONGODB_URL")).toBe("mongodb://host/db");
+    expect(fake.steps.at(-1)).toBe("reload");
+  });
+
+  it("refuses to pin a credential this machine does not have", async () => {
+    const fake = fakeAdapter("darwin");
+
+    await expect(
+      runCommand(runner(), ["pin-config-secret"], fake.adapter),
+    ).rejects.toThrow(/no credential is stored/);
   });
 
   it("defaults the database name so the user only supplies a URL", async () => {
@@ -541,7 +601,10 @@ describe("the credential this machine already had", () => {
       syncConfigured: true,
       db: "mangas",
     });
-    expect(fake.written.get("MONGODB_URL")).toBe("mongodb://host/db");
+    // The sentinel, not the credential: reusing it means pointing the launcher
+    // at the keystore, not copying the value back into a file.
+    expect(fake.written.get("MONGODB_URL")).toBe("keystore");
+    expect(fake.secret).toBe("mongodb://host/db");
     expect(fake.steps.at(-1)).toBe("reload");
   });
 

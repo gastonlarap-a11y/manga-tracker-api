@@ -99,10 +99,14 @@ jobs:
           cd "$PKG"
           # A database that does not exist yet: the server has to create and
           # migrate it on its own, which is the whole point.
+          # Through launch.js, not index.js: the launcher is what an installed
+          # service actually starts, so it is what has to be proven to serve.
+          # With no MONGODB_URL it takes the "sync is off" path and never goes
+          # near a keystore, which is also the only way this can run in CI.
           DATABASE_URL="file:${RUNNER_TEMP}/smoke.db" \
           PORT=5199 \
           MIGRATIONS_DIR="$PKG/migrations" \
-            bun run index.js > "${RUNNER_TEMP}/server.log" 2>&1 &
+            bun run launch.js > "${RUNNER_TEMP}/server.log" 2>&1 &
           echo $! > "${RUNNER_TEMP}/server.pid"
 
           for attempt in $(seq 1 30); do
