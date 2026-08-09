@@ -24,6 +24,7 @@
 import { mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { DEFAULT_PORT } from "../src/lib/port";
 import { ENV_MANIFEST, resolveSpec } from "./lib/env";
 import { platform } from "./lib/platform";
 import { runVisible, spawnRunner } from "./lib/run";
@@ -129,13 +130,12 @@ if (!userCanControlIt) {
 // generates it for the same reason. prisma.config.ts resolves the datasource
 // from DATABASE_URL, which nothing has exported into this process, so it is
 // passed explicitly — exactly how deploy.ts runs `prisma migrate deploy`.
-const databaseUrlSpec = ENV_MANIFEST.find(
-  (spec) => spec.name === "DATABASE_URL",
-);
-const databaseUrl =
-  databaseUrlSpec === undefined
-    ? null
-    : resolveSpec(databaseUrlSpec, "prod", home, new Map());
+const prodValue = (name: string): string | null => {
+  const spec = ENV_MANIFEST.find((candidate) => candidate.name === name);
+  return spec === undefined ? null : resolveSpec(spec, "prod", home, new Map());
+};
+
+const databaseUrl = prodValue("DATABASE_URL");
 if (databaseUrl === null) {
   fail("DATABASE_URL is not a derivable production value");
 }
@@ -203,8 +203,11 @@ done(`Extension built at ${extensionOutput}.`);
 // --- 8. what is left ----------------------------------------------------------
 
 heading("Done");
-done("Backend is up: http://127.0.0.1:5150/health");
-console.log(`Dashboard:     http://127.0.0.1:5150/`);
+// From the manifest, not a literal: the port is configuration, and printing a
+// URL nobody is listening on is the worst possible last line of an installer.
+const baseUrl = `http://127.0.0.1:${prodValue("PORT") ?? DEFAULT_PORT}`;
+done(`Backend is up: ${baseUrl}/health`);
+console.log(`Dashboard:     ${baseUrl}/`);
 warn(
   "One manual step left — Chrome will not load an unpacked extension from a " +
     "script for security reasons:\n" +

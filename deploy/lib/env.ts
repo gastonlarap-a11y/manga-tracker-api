@@ -8,6 +8,11 @@
  * here, not an edit in four scripts.
  */
 
+// The one import from src/: the default extension id has to be the same value
+// the server falls back to, and two copies of a 32-character literal drift
+// exactly once — the day the extension goes silent for no visible reason.
+import { UNPACKED_EXTENSION_ID } from "../../src/lib/cors";
+
 export type Profile = "dev" | "prod";
 
 export type EnvSpec = {
@@ -51,6 +56,14 @@ export const ENV_MANIFEST: readonly EnvSpec[] = [
       "Dev and prod share the port on purpose: bootout the LaunchAgent to free it for `bun run dev`.",
     dev: "5150",
     prod: "5150",
+  },
+  {
+    name: "EXTENSION_IDS",
+    kind: "profile",
+    comment:
+      "Extension ids allowed through CORS, comma separated. Add the Web Store id here when the extension is published; the unpacked one stays so a dev build keeps working.",
+    dev: UNPACKED_EXTENSION_ID,
+    prod: UNPACKED_EXTENSION_ID,
   },
   {
     name: "MONGODB_URL",

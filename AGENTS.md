@@ -24,7 +24,8 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   top-level scripts and `secrets.ts` depend on instead of importing either directly), and
   `azure.json` — committed, non-secret, names the resource group and vault
 - `src/lib/` — pure shared utilities (normalization, chapter parsing, series keys, title
-  similarity, merge-group resolution, shared Zod schemas + error hook) with colocated tests
+  similarity, merge-group resolution, CORS allowlist, port parsing, shared Zod schemas + error
+  hook) with colocated tests
 - `src/generated/prisma/` — generated Prisma client (never edit; gitignored)
 - `prisma/schema.prisma` — data model; migrations live in `prisma/migrations/`
 - `public/` — dashboard static build (gitignored), deployed from the sibling
@@ -89,6 +90,20 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
 - `deploy/` talks to the outside world only through the `Runner` in `deploy/lib/run.ts`, so
   command construction stays testable without an Azure subscription. Secrets go to `az` through
   a 0600 temp file, never `--value`, which `ps` would expose.
+- Nothing in `src/` may import from `deploy/`; the reverse is allowed **only for pure constants
+  and parsers in `src/lib/`** that describe a value both sides handle — today `parsePort` and
+  `UNPACKED_EXTENSION_ID`. The manifest declares a default that `src/config.ts` also falls back
+  to, and a second copy of that value drifts exactly once: the day the extension goes silent for
+  no visible reason. Anything with a side effect stays on its own side of the line.
+- The port and the allowed extension ids are configuration, never literals. `PORT` is chosen by
+  whoever installs (the CORS allowlist follows it, and `deploy/` reads it from the manifest);
+  `EXTENSION_IDS` holds several ids at once because the Web Store assigns one on publication and
+  the unpacked build has to keep working until every machine has updated. Port `0` is rejected on
+  purpose: it would make the OS pick, and nothing that has to reach this server afterwards — the
+  extension, the desktop app, the health probe — could learn which port it got.
+- `GET /health` answers `{status, service}`. The `service` string is a contract, not decoration:
+  a client that discovers the backend by probing loopback ports uses it to tell this process from
+  anything else answering 200 on the same machine.
 - `test-setup.ts` deletes `MONGODB_URL` before anything imports `config.ts`. The suite must be
   hermetic by construction, not because a developer's `.env` happens to lack the credential —
   a `POST /sync/now` from a test run is a real write into the shared store, and events there

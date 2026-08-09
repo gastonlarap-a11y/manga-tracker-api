@@ -87,10 +87,14 @@ seis cosas, en orden:
 
 1. **Crea la app**: `const app = new OpenAPIHono()` — un router de Hono que además sabe
    generar documentación OpenAPI a partir de las rutas.
-2. **CORS**: `app.use("*", cors({ origin: [...] }))` — solo acepta peticiones de navegador
-   originadas en `http://127.0.0.1:5150` / `http://localhost:5150` (el dashboard, que es
-   same-origin) y en `chrome-extension://cfjiinlnepkmlaafdclmlpjbmpofplop` (la extensión;
-   el id puede estar clavado porque su manifest lleva `key`, que lo hace fijo).
+2. **CORS**: `app.use("*", cors({ origin: allowedOrigins(...) }))` — la lista la arma
+   `src/lib/cors.ts` a partir de la configuración, y por eso ya no hay ningún literal:
+   `http://127.0.0.1:<PORT>` / `http://localhost:<PORT>` (el dashboard, que es same-origin)
+   y un `chrome-extension://<id>` por cada id de `EXTENSION_IDS`. Son varios ids a propósito:
+   cargada a mano, Chrome le da a la extensión el id que sale de la `key` de su manifest;
+   publicada, la tienda le asigna otro, y los dos tienen que funcionar a la vez mientras las
+   máquinas se actualizan. Un id mal escrito **corta el arranque** en vez de ignorarse en
+   silencio — si no, la extensión queda muda meses después sin nada en los logs que lo explique.
    (Postman y curl no son navegadores: a ellos CORS no les aplica.)
 3. **Red de seguridad de errores**: `app.onError(...)` — si algo revienta sin ser manejado,
    loguea el stack y responde `500 {"error": "Internal Server Error"}`. Toda la API usa ese
@@ -120,7 +124,9 @@ módulo `events`).
 | Función/constante | Qué hace | Quién la usa |
 |---|---|---|
 | `required(name)` | Lee `Bun.env[name]` y **lanza un error si falta** — el server no arranca a medias | interna del archivo |
-| `config` | `{ databaseUrl, port }` — `DATABASE_URL` obligatoria, `PORT` opcional (default 5150) | `src/db/client.ts` (la URL) y `src/index.ts` (el puerto) |
+| `config` | `{ databaseUrl, port, extensionIds, mongo, migrationsDir }` — `DATABASE_URL` obligatoria; el resto opcional | `src/db/client.ts` (la URL), `src/index.ts` (puerto, orígenes y migraciones), `src/modules/sync/*` (Mongo) |
+| `parsePort(raw)` | Valida `PORT`: vacío → 5150, entero 1–65535 → ese, cualquier otra cosa → error que **nombra el valor**. Antes era `Number(...)`, que convierte un typo en `NaN` y falla más tarde sin decir por qué | `src/config.ts` y `deploy/deploy.ts` (misma validación en los dos lados) |
+| `parseExtensionIds(raw)` | Parte `EXTENSION_IDS` por comas y valida cada id (32 letras a–p). Vacío → el id de la extensión cargada a mano | `src/config.ts` |
 
 Regla del repo: **ningún otro archivo lee variables de entorno**. Todo recibe valores desde
 aquí. Eso hace trivial saber qué configuración existe y de dónde sale. Se evalúa al importar
