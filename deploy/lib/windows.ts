@@ -249,6 +249,11 @@ export interface InstallTaskOptions {
   readonly name?: string;
   readonly bunPath: string;
   readonly workingDirectory: string;
+  /**
+   * What bun runs, relative to `workingDirectory`. A checkout runs the source;
+   * an installed copy runs a single bundled file and has no `src/` at all.
+   */
+  readonly entry?: string;
 }
 
 export interface InstallTaskOutcome {
@@ -298,7 +303,12 @@ const taskFilePath = (name: string): string =>
  */
 export async function installTask(
   run: Runner,
-  { name = TASK_NAME, bunPath, workingDirectory }: InstallTaskOptions,
+  {
+    name = TASK_NAME,
+    bunPath,
+    workingDirectory,
+    entry = "src\\index.ts",
+  }: InstallTaskOptions,
 ): Promise<InstallTaskOutcome> {
   const user = `${process.env.COMPUTERNAME ?? ""}\\${userInfo().username}`;
   const xml = `<?xml version="1.0" encoding="UTF-16"?>
@@ -334,7 +344,7 @@ export async function installTask(
   <Actions Context="Author">
     <Exec>
       <Command>cmd.exe</Command>
-      <Arguments>/c ""${bunPath}" --env-file="${CONFIG_PATH}" run src\\index.ts >> "${OUT_LOG_PATH}" 2>> "${LOG_PATH}""</Arguments>
+      <Arguments>/c ""${bunPath}" --env-file="${CONFIG_PATH}" run "${entry}" >> "${OUT_LOG_PATH}" 2>> "${LOG_PATH}""</Arguments>
       <WorkingDirectory>${workingDirectory}</WorkingDirectory>
     </Exec>
   </Actions>

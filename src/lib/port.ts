@@ -10,6 +10,24 @@
 /** What a checkout uses when nothing sets PORT. Every other value is chosen by whoever installs. */
 export const DEFAULT_PORT = 5150;
 
+/**
+ * The last port an installer may fall back to.
+ *
+ * This window is a contract, not a preference: the browser extension
+ * (`utils/api/discovery.ts`) and the desktop app (`internal/backend/discover.go`)
+ * find this server by probing exactly these ports. An installer that picks
+ * outside the range produces a backend neither of them can reach.
+ */
+export const LAST_PORT = 5159;
+
+export function candidatePorts(): number[] {
+  const ports: number[] = [];
+  for (let port = DEFAULT_PORT; port <= LAST_PORT; port++) {
+    ports.push(port);
+  }
+  return ports;
+}
+
 export function parsePort(raw: string | undefined): number {
   const trimmed = (raw ?? "").trim();
   if (trimmed === "") {

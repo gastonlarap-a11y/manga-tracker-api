@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { reloadService } from "./macos";
+import { mkdtemp, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { reloadService, writePlist } from "./macos";
 import { createFakeRunner, type FakeResponse } from "./run";
 
 /**
@@ -98,5 +101,113 @@ describe("reloadService", () => {
     await reloadService(fake.run, FAST);
 
     expect(fake.calls.filter((call) => is(call, "bootstrap")).length).toBe(1);
+  });
+});
+
+describe("writePlist", () => {
+  /** Never the real PLIST_PATH: this suite must not touch the production agent. */
+  async function inTempDir<T>(body: (dir: string) => Promise<T>): Promise<T> {
+    const dir = await mkdtemp(join(tmpdir(), "plist-test-"));
+    try {
+      return await body(dir);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  }
+
+  const options = (dir: string) => ({
+    bunPath: "/opt/app/bun",
+    entry: "index.js",
+    workingDirectory: "/opt/app",
+    logDir: join(dir, "logs"),
+    path: join(dir, "com.mangatracker.plist"),
+  });
+
+  // `plutil` ships with macOS and nowhere else, and this suite has to pass on
+  // Linux and Windows too. Where it exists it is the authority on whether the
+  // file is valid — far better evidence than any regex over the XML.
+  const onMac = it.skipIf(process.platform !== "darwin");
+
+  onMac("writes a plist launchd can parse", async () => {
+    await inTempDir(async (dir) => {
+      const path = join(dir, "com.mangatracker.plist");
+      await writePlist(options(dir));
+
+      expect(Bun.spawnSync(["plutil", "-lint", path]).exitCode).toBe(0);
+    });
+  });
+
+  it("points launchd at the bundled interpreter and entry point", async () => {
+    await inTempDir(async (dir) => {
+      const path = join(dir, "com.mangatracker.plist");
+      await writePlist(options(dir));
+      const plist = await Bun.file(path).text();
+
+      expect(plist).toContain("<string>/opt/app/bun</string>");
+      expect(plist).toContain("<string>index.js</string>");
+      expect(plist).toContain("<string>/opt/app</string>");
+      // An installed copy has no src/ tree at all.
+      expect(plist).not.toContain("src/index.ts");
+    });
+  });
+
+  it("leaves the environment empty for writePlistEnv to fill", async () => {
+    // One code path writes the values, and it is the one that also re-tightens
+    // the file's permissions.
+    await inTempDir(async (dir) => {
+      const path = join(dir, "com.mangatracker.plist");
+      await writePlist(options(dir));
+
+      expect(await Bun.file(path).text()).toContain("<dict/>");
+    });
+  });
+
+  it("creates the log directory, without which launchd refuses to start", async () => {
+    await inTempDir(async (dir) => {
+      await writePlist(options(dir));
+
+      expect((await stat(join(dir, "logs"))).isDirectory()).toBe(true);
+    });
+  });
+
+  // Windows has no POSIX permission bits to assert on.
+  it.skipIf(process.platform === "win32")(
+    "keeps the file unreadable by other accounts",
+    async () => {
+      // It ends up holding the cluster password, and launchd creates plists
+      // world-readable by default.
+      await inTempDir(async (dir) => {
+        const path = join(dir, "com.mangatracker.plist");
+        await writePlist(options(dir));
+
+        expect((await stat(path)).mode & 0o777).toBe(0o600);
+      });
+    },
+  );
+
+  it("escapes a path that would otherwise break the XML", async () => {
+    await inTempDir(async (dir) => {
+      const path = join(dir, "com.mangatracker.plist");
+      await writePlist({
+        ...options(dir),
+        workingDirectory: "/opt/Rock & Roll/<app>",
+      });
+
+      expect(await Bun.file(path).text()).toContain(
+        "Rock &amp; Roll/&lt;app&gt;",
+      );
+    });
+  });
+
+  onMac("stays parseable when a path carries XML metacharacters", async () => {
+    await inTempDir(async (dir) => {
+      const path = join(dir, "com.mangatracker.plist");
+      await writePlist({
+        ...options(dir),
+        workingDirectory: "/opt/Rock & Roll/<app>",
+      });
+
+      expect(Bun.spawnSync(["plutil", "-lint", path]).exitCode).toBe(0);
+    });
   });
 });

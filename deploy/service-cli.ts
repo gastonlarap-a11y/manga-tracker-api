@@ -1,0 +1,252 @@
+/**
+ * The backend's service control, as a process.
+ *
+ * The desktop app is written in Go and has to install and configure this
+ * backend on someone else's computer. Everything needed to do that already
+ * exists here — `deploy/lib/macos.ts` and `deploy/lib/windows.ts` — and it
+ * carries knowledge that cost broken installs to get right: on macOS the
+ * bootout → wait for the job to disappear → bootstrap sequence, on Windows the
+ * S4U logon type plus the `icacls` grant afterwards. Reimplementing that in Go
+ * would be reintroducing those bugs from scratch.
+ *
+ * So it is exposed as a command instead of duplicated: the app spawns this,
+ * reads one JSON object from stdout, and checks the exit code. That is a border
+ * a test can stand on, and it does not tie the two languages together.
+ *
+ * Usage (every command prints a single JSON object):
+ *   service-cli install --app-dir <dir> --data-dir <dir> [--port <n>]
+ *   service-cli status
+ *   service-cli restart
+ *   service-cli set-sync --url <mongodb-url> [--db <name>]
+ *   service-cli clear-sync
+ */
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
+import { DEFAULT_EXTENSION_IDS } from "../src/lib/cors";
+import { candidatePorts, parsePort } from "../src/lib/port";
+import { type PlatformAdapter, platform } from "./lib/platform";
+import { type Runner, spawnRunner } from "./lib/run";
+
+/** Every reply is one JSON object, so the caller never has to guess. */
+type Reply = Record<string, unknown>;
+
+export function parseArgs(argv: readonly string[]): {
+  command: string;
+  options: Map<string, string>;
+} {
+  const [command = "", ...rest] = argv;
+  const options = new Map<string, string>();
+  for (let index = 0; index < rest.length; index += 1) {
+    const flag = rest[index];
+    if (flag === undefined || !flag.startsWith("--")) {
+      continue;
+    }
+    const next = rest[index + 1];
+    const hasValue = next !== undefined && !next.startsWith("--");
+    // A flag followed by another flag is a flag, not a key whose value is the
+    // next flag's name.
+    options.set(flag.slice(2), hasValue ? next : "");
+    if (hasValue) {
+      index += 1;
+    }
+  }
+  return { command, options };
+}
+
+function required(options: Map<string, string>, name: string): string {
+  const value = options.get(name);
+  if (value === undefined || value === "") {
+    throw new Error(`--${name} is required`);
+  }
+  return value;
+}
+
+/**
+ * Binding is the only honest way to ask whether a port is free: anything else
+ * races with whatever takes it a millisecond later. The window comes from
+ * `src/lib/port.ts` — the same one the extension and the desktop app probe.
+ */
+export async function firstFreePort(): Promise<number> {
+  const ports = candidatePorts();
+  for (const port of ports) {
+    try {
+      const probe = Bun.serve({
+        port,
+        hostname: "127.0.0.1",
+        fetch: () => new Response(),
+      });
+      probe.stop(true);
+      return port;
+    } catch {
+      // Taken. Next one.
+    }
+  }
+  throw new Error(
+    `no free port between ${ports[0]} and ${ports.at(-1)}. ` +
+      "The extension and the desktop app only look inside that window.",
+  );
+}
+
+/** The four values an installed backend needs. Nothing personal is among them. */
+export function environmentFor(
+  appDir: string,
+  dataDir: string,
+  port: number,
+): Map<string, string> {
+  return new Map([
+    ["DATABASE_URL", `file:${join(dataDir, "mangatracker.db")}`],
+    ["PORT", String(port)],
+    ["EXTENSION_IDS", DEFAULT_EXTENSION_IDS.join(",")],
+    // The packaged server is a single bundled file with no src/ tree above it
+    // to walk up from, so it is told where the .sql files live.
+    ["MIGRATIONS_DIR", join(appDir, "migrations")],
+  ]);
+}
+
+async function writeEnvironment(
+  run: Runner,
+  adapter: PlatformAdapter,
+  values: ReadonlyMap<string, string>,
+): Promise<void> {
+  for (const [key, value] of values) {
+    if (!(await adapter.writeConfigEnv(run, key, value))) {
+      throw new Error(`could not write ${key} to ${adapter.configLabel}`);
+    }
+  }
+}
+
+async function install(
+  run: Runner,
+  adapter: PlatformAdapter,
+  options: Map<string, string>,
+): Promise<Reply> {
+  const appDir = required(options, "app-dir");
+  const dataDir = required(options, "data-dir");
+  const port = options.has("port")
+    ? parsePort(options.get("port"))
+    : await firstFreePort();
+
+  // The database lives here and the server does not create the directory.
+  await mkdir(dataDir, { recursive: true });
+
+  // The definition first, with no values in it: on macOS the environment is
+  // written with `plutil -replace`, which fails on a plist that does not exist.
+  const outcome = await adapter.installService(run, {
+    bunPath: join(appDir, adapter.os === "win32" ? "bun.exe" : "bun"),
+    entry: "index.js",
+    workingDirectory: appDir,
+  });
+
+  await writeEnvironment(run, adapter, environmentFor(appDir, dataDir, port));
+  await adapter.reloadService(run);
+
+  return {
+    ok: true,
+    port,
+    dataDir,
+    service: adapter.serviceLabel,
+    serviceKind: adapter.serviceKind,
+    // Reported rather than swallowed: on Windows a task registered from an
+    // elevated shell can end up unstartable by the account that owns it.
+    userCanControlIt: outcome.userCanControlIt,
+  };
+}
+
+async function status(run: Runner, adapter: PlatformAdapter): Promise<Reply> {
+  const installed = await adapter.configExists();
+  const port = installed ? await adapter.readConfigEnv(run, "PORT") : null;
+  const syncUrl = installed
+    ? await adapter.readConfigEnv(run, "MONGODB_URL")
+    : null;
+  return {
+    ok: true,
+    installed,
+    port: port === null || port === "" ? null : Number(port),
+    // Whether it is configured, never the credential itself.
+    syncConfigured: syncUrl !== null && syncUrl !== "",
+    configPath: adapter.configPath,
+    service: adapter.serviceLabel,
+  };
+}
+
+/**
+ * Sync is opt-in and personal: these are the user's own credentials, kept in the
+ * system keystore, and nothing about them ships with the app.
+ */
+async function setSync(
+  run: Runner,
+  adapter: PlatformAdapter,
+  options: Map<string, string>,
+): Promise<Reply> {
+  const url = required(options, "url");
+  const db = options.get("db") || "mangatracker";
+  if (!(await adapter.writeSecret(run, url))) {
+    throw new Error(
+      `could not store the credential in the ${adapter.secretCacheLabel}`,
+    );
+  }
+  await writeEnvironment(
+    run,
+    adapter,
+    new Map([
+      ["MONGODB_URL", url],
+      ["MONGODB_DB", db],
+    ]),
+  );
+  await adapter.reloadService(run);
+  return { ok: true, syncConfigured: true, db };
+}
+
+/** Blank rather than removed: readers treat an empty value as "not configured". */
+async function clearSync(
+  run: Runner,
+  adapter: PlatformAdapter,
+): Promise<Reply> {
+  await writeEnvironment(run, adapter, new Map([["MONGODB_URL", ""]]));
+  await adapter.reloadService(run);
+  return { ok: true, syncConfigured: false };
+}
+
+/**
+ * The adapter is a parameter, not a module-level constant read off
+ * `process.platform`: the suite has to exercise the Windows path from a Mac and
+ * the other way round, exactly like `Runner` pins the commands.
+ */
+export async function runCommand(
+  run: Runner,
+  argv: readonly string[],
+  adapter: PlatformAdapter = platform,
+): Promise<Reply> {
+  const { command, options } = parseArgs(argv);
+  switch (command) {
+    case "install":
+      return await install(run, adapter, options);
+    case "status":
+      return await status(run, adapter);
+    case "restart":
+      await adapter.reloadService(run);
+      return { ok: true, restarted: adapter.serviceLabel };
+    case "set-sync":
+      return await setSync(run, adapter, options);
+    case "clear-sync":
+      return await clearSync(run, adapter);
+    default:
+      throw new Error(
+        `unknown command "${command}". Expected install, status, restart, set-sync or clear-sync.`,
+      );
+  }
+}
+
+// Only when run as a program: importing this from a test must not touch the
+// machine or call process.exit.
+if (import.meta.main) {
+  try {
+    console.log(
+      JSON.stringify(await runCommand(spawnRunner, Bun.argv.slice(2))),
+    );
+  } catch (cause) {
+    const error = cause instanceof Error ? cause.message : String(cause);
+    console.log(JSON.stringify({ ok: false, error }));
+    process.exit(1);
+  }
+}
