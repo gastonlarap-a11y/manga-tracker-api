@@ -4,6 +4,7 @@ import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
 import { config } from "./config";
 import { applyMigrations } from "./db/migrate";
+import { allowedOrigins } from "./lib/cors";
 import { adaptersRoutes } from "./modules/adapters/adapters.routes";
 import { duplicatesRoutes } from "./modules/duplicates/duplicates.routes";
 import { eventsRoutes } from "./modules/events/events.routes";
@@ -24,14 +25,16 @@ if (migration.applied.length > 0) {
 
 const app = new OpenAPIHono();
 
+// Loopback on the port this process actually listens on, plus every configured
+// extension id — see src/lib/cors.ts for why neither can be a literal.
 app.use(
   "*",
   cors({
     origin: [
-      "http://127.0.0.1:5150",
-      "http://localhost:5150",
-      // manga-tracker-extension: id pinned by the fixed manifest key.
-      "chrome-extension://cfjiinlnepkmlaafdclmlpjbmpofplop",
+      ...allowedOrigins({
+        port: config.port,
+        extensionIds: config.extensionIds,
+      }),
     ],
   }),
 );

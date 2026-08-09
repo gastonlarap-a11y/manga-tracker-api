@@ -31,7 +31,8 @@ bun run db:migrate
 | Variable | Required | What it does |
 |---|---|---|
 | `DATABASE_URL` | yes | SQLite file location — the source of truth |
-| `PORT` | no (5150) | Port the API listens on, always bound to `127.0.0.1` |
+| `PORT` | no (5150) | Port the API listens on, always bound to `127.0.0.1`. The CORS allowlist follows it, so a different port needs no other change. `0` is rejected: nothing could then find the server |
+| `EXTENSION_IDS` | no (the unpacked id) | Comma-separated Chrome extension ids allowed through CORS. Several at once, so a Web Store build and a locally loaded one can both talk to the backend. A malformed id fails startup instead of being skipped |
 | `MONGODB_URL` | no | Azure DocumentDB connection string, in direct `mongodb://host:10260/?tls=true&…` form — **not** `mongodb+srv://` (Bun on Windows returns `["127.0.0.1"]` from `dns.getServers()`, so every SRV lookup fails). **Unset means the replica is off** and the app behaves exactly as it did before it existed |
 | `MONGODB_DB` | no (`mangatracker`) | Database name inside the cluster |
 

@@ -1,3 +1,6 @@
+import { parseExtensionIds } from "./lib/cors";
+import { parsePort } from "./lib/port";
+
 const required = (name: string): string => {
   const value = Bun.env[name];
   if (!value) {
@@ -24,7 +27,11 @@ const mongoConfig = (): MongoConfig | null => {
 
 export const config = {
   databaseUrl: required("DATABASE_URL"),
-  port: Number(Bun.env.PORT ?? 5150),
+  port: parsePort(Bun.env.PORT),
+  // Which extension builds may call this API from a browser. Several at once,
+  // because the Web Store assigns an id of its own on publication and the
+  // unpacked build has to keep working while machines catch up.
+  extensionIds: parseExtensionIds(Bun.env.EXTENSION_IDS),
   mongo: mongoConfig(),
   // Where the committed .sql migrations live. Unset in a checkout, where the
   // default next to the source is right; set by the packaged app, whose server

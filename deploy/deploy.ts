@@ -12,6 +12,7 @@
  *   bun run deploy --dry-run      # report what it would do, change nothing
  */
 import { homedir } from "node:os";
+import { parsePort } from "../src/lib/port";
 import { ENV_MANIFEST, resolveSpec } from "./lib/env";
 import { waitForHealth } from "./lib/health";
 import { platform } from "./lib/platform";
@@ -39,7 +40,8 @@ const prodValue = (name: string): string => {
 };
 
 const databaseUrl = prodValue("DATABASE_URL");
-const port = Number(prodValue("PORT"));
+// Same parser the server uses, so the health probe cannot end up polling NaN.
+const port = parsePort(prodValue("PORT"));
 
 heading(dryRun ? "Deploy (dry run)" : "Deploy");
 
