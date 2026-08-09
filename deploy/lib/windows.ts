@@ -210,6 +210,32 @@ export interface ReloadOptions {
  * keeps a stale credential — Task Scheduler has nothing analogous to launchd's
  * in-memory cache to worry about.
  */
+/**
+ * Ends the task and waits until it is really gone.
+ *
+ * The wait is the point. `/End` returns before the process has exited, and on
+ * Windows a file a running process holds open cannot be replaced — so an update
+ * that extracts over the backend while it is still dying fails outright.
+ */
+export async function stopService(
+  run: Runner,
+  {
+    name = TASK_NAME,
+    settleAttempts = 20,
+    settleDelayMs = 250,
+  }: ReloadOptions = {},
+): Promise<void> {
+  // /End fails when the task is not running, which is a fine starting state.
+  await run(["schtasks", "/End", "/TN", name]);
+
+  for (let attempt = 0; attempt < settleAttempts; attempt++) {
+    if (!(await isRunning(run, name))) {
+      return;
+    }
+    await Bun.sleep(settleDelayMs);
+  }
+}
+
 export async function reloadService(
   run: Runner,
   {
@@ -219,15 +245,7 @@ export async function reloadService(
     runAttempts = 3,
   }: ReloadOptions = {},
 ): Promise<void> {
-  // /End fails when the task is not running, which is a fine starting state.
-  await run(["schtasks", "/End", "/TN", name]);
-
-  for (let attempt = 0; attempt < settleAttempts; attempt++) {
-    if (!(await isRunning(run, name))) {
-      break;
-    }
-    await Bun.sleep(settleDelayMs);
-  }
+  await stopService(run, { name, settleAttempts, settleDelayMs });
 
   let last = await run(["schtasks", "/Run", "/TN", name]);
   for (let attempt = 1; attempt < runAttempts && !last.ok; attempt++) {

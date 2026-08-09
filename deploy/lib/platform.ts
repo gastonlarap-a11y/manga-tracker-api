@@ -53,6 +53,12 @@ export interface PlatformAdapter {
   writeSecret(run: Runner, value: string): Promise<boolean>;
   reloadService(run: Runner): Promise<void>;
   /**
+   * Stops the service and waits until it has really stopped. Separate from
+   * reloadService because an update has to replace files the running backend
+   * holds open, which on Windows fails while the process is alive.
+   */
+  stopService(run: Runner): Promise<void>;
+  /**
    * Creates the service definition on a machine that has never had one. Every
    * other method here edits something that already exists — which held while a
    * plist was copied by hand once, and stops holding when an installer runs on
@@ -79,6 +85,7 @@ export const macosAdapter: PlatformAdapter = {
   readSecret: (run) => macos.readKeychain(run),
   writeSecret: (run, value) => macos.writeKeychain(run, value),
   reloadService: (run) => macos.reloadService(run),
+  stopService: (run) => macos.stopService(run),
   // launchd agents live in the user's own domain, so nothing here needs
   // elevation and the account can always control what it registered.
   installService: async (_run, options) => {
@@ -102,6 +109,7 @@ export const windowsAdapter: PlatformAdapter = {
   readSecret: (run) => windows.readSecret(run),
   writeSecret: (run, value) => windows.writeSecret(run, value),
   reloadService: (run) => windows.reloadService(run),
+  stopService: (run) => windows.stopService(run),
   installService: (run, options) => windows.installTask(run, options),
 };
 
