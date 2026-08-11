@@ -18,6 +18,14 @@ export function getAdapterByDomain(
 }
 
 /**
+ * Every calibration on this machine, for the single request the extension makes
+ * to learn about sites (`GET /api/site-rules`).
+ */
+export function listAdapters(): Promise<SiteAdapter[]> {
+  return prisma.siteAdapter.findMany({ orderBy: { domain: "asc" } });
+}
+
+/**
  * Replace semantics per the GUIA ("si ya había una, se reemplaza"): a
  * recalibration replaces the whole config, so omitted optionals clear any
  * previously stored selector.
