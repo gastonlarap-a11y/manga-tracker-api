@@ -1,6 +1,7 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { streamSSE } from "hono/streaming";
 import { defaultHook, errorSchema } from "../../lib/http";
+import { isSiteNameTitle } from "../../lib/normalize";
 import {
   mangaSchema,
   readingEventSchema,
@@ -19,6 +20,14 @@ const createEventBodySchema = z
     // The series page this chapter belongs to, when the site exposes one. The
     // server derives the stored identity key from it; the raw URL is not kept.
     seriesUrl: z.url().optional(),
+  })
+  // A title that is only the site naming itself is an interstitial, not a
+  // manga — see isSiteNameTitle. Refused as a malformed request rather than
+  // dropped inside the service, because that is what it is: the body describes
+  // no reading. Nothing is lost; the page reports again once it really loads.
+  .refine((body) => !isSiteNameTitle(body.mangaName, body.sourceUrl), {
+    path: ["mangaName"],
+    error: "mangaName is the site's own name, not a manga",
   })
   .openapi("CreateEventBody");
 

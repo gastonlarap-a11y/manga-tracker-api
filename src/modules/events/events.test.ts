@@ -297,6 +297,35 @@ describe("POST /events", () => {
     errorSchema.parse(await res.json());
     expect(await prisma.readingEvent.count()).toBe(0);
   });
+
+  it("rejects a title that is only the site naming itself", async () => {
+    // The Cloudflare interstitial: served on the chapter's own URL, with the
+    // hostname as its heading. Accepted once, it became a card that two
+    // unrelated series were then filed under.
+    const res = await postEvent({
+      mangaName: "lectorxd.com",
+      chapterLabel: "Cap. 1",
+      sourceUrl:
+        "https://lectorxd.com/manhwa/subida-de-nivel-infinita-en-murim/leer/1",
+    });
+
+    expect(res.status).toBe(400);
+    expect(errorSchema.parse(await res.json()).error).toContain("mangaName");
+    expect(await prisma.manga.count()).toBe(0);
+    expect(await prisma.readingEvent.count()).toBe(0);
+  });
+
+  it("still records a real chapter from that same site", async () => {
+    const res = await postEvent({
+      mangaName: "Subida de nivel infinita en Murim",
+      chapterLabel: "Cap. 1",
+      sourceUrl:
+        "https://lectorxd.com/manhwa/subida-de-nivel-infinita-en-murim/leer/1",
+    });
+
+    expect(res.status).toBe(201);
+    expect(await prisma.readingEvent.count()).toBe(1);
+  });
 });
 
 // The two titles that used to produce two cards for one series.

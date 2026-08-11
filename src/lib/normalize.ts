@@ -79,3 +79,39 @@ export function chapterKey(chapter: {
     ? `n:${chapter.chapterNumber}`
     : `l:${chapter.chapterLabel}`;
 }
+
+/**
+ * Whether a reported title is just the site naming itself.
+ *
+ * A Cloudflare interstitial is served on the chapter's own URL, with the
+ * hostname as its only heading and no og/twitter tags, so a detector has
+ * nothing left to tell it apart from a manga name. That is how "lectorxd.com"
+ * became a card that two unrelated series were then filed under: without a
+ * series key, the title IS the identity, so a bad title does not produce one
+ * junk card — it merges whatever arrives while the challenge is up.
+ *
+ * Refused here rather than in the extension because the browser holds whichever
+ * version it last updated to, and this has to hold for the ones already out
+ * there. The reading is not lost: the challenge clears, the real page loads,
+ * and the detector reports it again.
+ *
+ * Compared on normalized slugs, so "LectorXD.com" and "www.lectorxd.com"
+ * collapse onto the same thing. Deliberately narrow: only the full hostname
+ * counts, never the bare brand without its TLD. Nothing is named "something dot
+ * com", while plenty of series could share a bare word with the site hosting
+ * them.
+ */
+export function isSiteNameTitle(mangaName: string, sourceUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    // An unparseable source URL is the request schema's problem, not this one's.
+    return false;
+  }
+  const hostname = url.hostname.replace(/^www\./i, "");
+  const hostSlug = normalizeSlug(hostname);
+  // normalizeSlug never returns "" (it falls back to "unknown-title"), so a
+  // title of pure punctuation could otherwise match a hostname of the same.
+  return hostSlug !== "unknown-title" && normalizeSlug(mangaName) === hostSlug;
+}
