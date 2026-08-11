@@ -10,6 +10,7 @@ import { duplicatesRoutes } from "./modules/duplicates/duplicates.routes";
 import { eventsRoutes } from "./modules/events/events.routes";
 import { healthRoutes } from "./modules/health/health.routes";
 import { libraryRoutes } from "./modules/library/library.routes";
+import { siteRulesRoutes } from "./modules/site-rules/site-rules.routes";
 import { syncRoutes } from "./modules/sync/sync.routes";
 import { startSyncScheduler } from "./modules/sync/sync.scheduler";
 
@@ -48,6 +49,7 @@ app.route("/", healthRoutes);
 app.route("/api", eventsRoutes);
 app.route("/api", libraryRoutes);
 app.route("/api", adaptersRoutes);
+app.route("/api", siteRulesRoutes);
 app.route("/api", duplicatesRoutes);
 app.route("/api", syncRoutes);
 

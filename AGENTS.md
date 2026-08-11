@@ -59,6 +59,15 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   and the `/docs` Swagger UI; Zod schemas are the source of truth for request/response types.
 - Handlers in `*.routes.ts` only validate and map responses; business logic lives in the
   module's `*.service.ts`.
+- **What the extension knows about a site is served from here, not compiled into it**
+  (`src/lib/site-rules.ts` + `GET /api/site-rules`). The extension ships through the Chrome Web
+  Store, so teaching it one new site used to cost a review — days of waiting for a regex. The
+  server travels in the desktop app instead and lands on a machine the next time it updates.
+  Curated in code rather than in a table on purpose: a table would need filling in by hand on
+  every machine, would ride the Mongo sync as if it were reading history, and could not be
+  tested. A rule earns its place only when the generic heuristic gets that site wrong, and
+  every one is measured against real history first — one key per series, and never one key
+  shared by two. A user's own calibration overrides the catalogue.
 - **A title that is only the site naming itself is refused at ingestion** (`isSiteNameTitle`,
   applied as a `.refine` on `POST /events`). A Cloudflare interstitial answers the chapter's
   own URL with the hostname as its heading, and a detector cannot tell that from a manga name
