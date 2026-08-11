@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
   chapterKey,
+  isSiteNameTitle,
   normalizeSlug,
   parseChapterNumber,
   seriesKeyFromUrl,
@@ -110,5 +111,49 @@ describe("chapterKey", () => {
     expect(chapterKey({ chapterNumber: 5, chapterLabel: "5" })).not.toBe(
       chapterKey({ chapterNumber: null, chapterLabel: "5" }),
     );
+  });
+});
+
+describe("isSiteNameTitle", () => {
+  const CHAPTER_URL =
+    "https://lectorxd.com/manhwa/subida-de-nivel-infinita-en-murim/leer/1";
+
+  it("catches the interstitial that filed two series under one card", () => {
+    // The measured signature: Cloudflare answers the chapter's own URL with the
+    // hostname as its only heading.
+    expect(isSiteNameTitle("lectorxd.com", CHAPTER_URL)).toBe(true);
+  });
+
+  it("ignores case and a www. the title does not carry", () => {
+    expect(isSiteNameTitle("LectorXD.com", CHAPTER_URL)).toBe(true);
+    expect(
+      isSiteNameTitle("lectorxd.com", "https://www.lectorxd.com/x/leer/1"),
+    ).toBe(true);
+  });
+
+  it("lets a real manga through, including one named after its site", () => {
+    expect(
+      isSiteNameTitle("Subida de nivel infinita en Murim", CHAPTER_URL),
+    ).toBe(false);
+    // Only the full hostname is branding. A bare word is a name a series may
+    // legitimately share with the site hosting it.
+    expect(isSiteNameTitle("LectorXD", CHAPTER_URL)).toBe(false);
+    // The mhscans title that motivated the extension's own branding filter is
+    // not an exact hostname, so this narrower rule leaves it alone.
+    expect(
+      isSiteNameTitle(
+        "MHScans - MHScans (Oficial)",
+        "https://mhscans.com/series/espadachin/capitulo-89/",
+      ),
+    ).toBe(false);
+  });
+
+  it("says nothing about a source URL it cannot parse", () => {
+    expect(isSiteNameTitle("lectorxd.com", "not-a-url")).toBe(false);
+  });
+
+  it("does not collapse punctuation onto a hostname of punctuation", () => {
+    // Both sides fall back to "unknown-title" without the guard.
+    expect(isSiteNameTitle("!!!", "https://%2E%2E.com/leer/1")).toBe(false);
   });
 });

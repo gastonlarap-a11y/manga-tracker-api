@@ -59,6 +59,13 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   and the `/docs` Swagger UI; Zod schemas are the source of truth for request/response types.
 - Handlers in `*.routes.ts` only validate and map responses; business logic lives in the
   module's `*.service.ts`.
+- **A title that is only the site naming itself is refused at ingestion** (`isSiteNameTitle`,
+  applied as a `.refine` on `POST /events`). A Cloudflare interstitial answers the chapter's
+  own URL with the hostname as its heading, and a detector cannot tell that from a manga name
+  — which is how `lectorxd.com` became a card that two unrelated series were filed under.
+  It lives here and not in the extension because a browser holds whichever version it last
+  updated to: this has to hold for the ones already installed. Only the full hostname counts,
+  never the bare brand, and nothing is lost — the challenge clears and the page reports again.
 - Never edit `src/generated/**`; never commit `.env*` or `*.db` files.
 - `.gitattributes` pins the working tree to LF on every platform. Biome's formatter enforces
   LF, so a CRLF checkout on Windows (`core.autocrlf=true`) fails `bun run lint` on every file
