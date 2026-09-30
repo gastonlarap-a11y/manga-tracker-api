@@ -16,6 +16,11 @@ export interface RecordReadingEventInput {
   coverUrl?: string;
   /** The series page this chapter belongs to, when the site exposes one. */
   seriesUrl?: string;
+  /**
+   * When it was read, for a report delivered late. Absent means now. Only a
+   * new event takes it: a chapter already recorded keeps the time it had.
+   */
+  readAt?: Date;
 }
 
 /** Identity columns only: enough to resolve groups, cheap enough to load always. */
@@ -130,6 +135,8 @@ export async function recordReadingEvent(
       sourceUrl: input.sourceUrl,
       sourceDomain,
       seriesKey,
+      // Undefined leaves the column's default, now().
+      readAt: input.readAt,
     },
   });
 

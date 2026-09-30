@@ -14,6 +14,23 @@ describe("errorHandler", () => {
     const res = await app.request("/");
 
     expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({
+      error: "Malformed JSON in request body",
+    });
+  });
+
+  it("gives a prepared response's text the same { error } shape", async () => {
+    // csrf throws with a ready Response and no message.
+    const app = new Hono().onError(errorHandler).get("/", () => {
+      throw new HTTPException(403, {
+        res: new Response("Forbidden", { status: 403 }),
+      });
+    });
+
+    const res = await app.request("/");
+
+    expect(res.status).toBe(403);
+    expect(await res.json()).toEqual({ error: "Forbidden" });
   });
 
   it("reports anything else as the fault it is", async () => {

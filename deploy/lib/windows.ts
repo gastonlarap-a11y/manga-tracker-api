@@ -224,16 +224,17 @@ export async function stopService(
     settleAttempts = 20,
     settleDelayMs = 250,
   }: ReloadOptions = {},
-): Promise<void> {
+): Promise<boolean> {
   // /End fails when the task is not running, which is a fine starting state.
   await run(["schtasks", "/End", "/TN", name]);
 
   for (let attempt = 0; attempt < settleAttempts; attempt++) {
     if (!(await isRunning(run, name))) {
-      return;
+      return true;
     }
     await Bun.sleep(settleDelayMs);
   }
+  return false;
 }
 
 export async function reloadService(
@@ -245,6 +246,8 @@ export async function reloadService(
     runAttempts = 3,
   }: ReloadOptions = {},
 ): Promise<void> {
+  // Whether it settled is not checked here: the /Run retries below cover a
+  // task that is still on its way out.
   await stopService(run, { name, settleAttempts, settleDelayMs });
 
   let last = await run(["schtasks", "/Run", "/TN", name]);

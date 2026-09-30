@@ -250,16 +250,17 @@ export async function stopService(
     settleDelayMs = 250,
     uid,
   }: ReloadOptions = {},
-): Promise<void> {
+): Promise<boolean> {
   // bootout fails when the service is not loaded, which is a fine starting state.
   await run(["launchctl", "bootout", `${domain(uid)}/${label}`]);
 
   for (let attempt = 0; attempt < settleAttempts; attempt++) {
     if (!(await isLoaded(run, label, uid))) {
-      return;
+      return true;
     }
     await Bun.sleep(settleDelayMs);
   }
+  return false;
 }
 
 export async function reloadService(
@@ -273,6 +274,8 @@ export async function reloadService(
     uid,
   }: ReloadOptions = {},
 ): Promise<void> {
+  // Whether it settled is not checked here: a teardown still in progress is
+  // exactly what the bootstrap retries below exist to wait out.
   await stopService(run, { label, settleAttempts, settleDelayMs, uid });
 
   // Teardown can still be settling after `print` stops finding the job, so the

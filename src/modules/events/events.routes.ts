@@ -11,6 +11,9 @@ import {
 import { subscribeLibraryChanges } from "./events.bus";
 import { recordReadingEvent } from "./events.service";
 
+/** How far past this machine's clock a reported readAt may be. See below. */
+const MAX_CLOCK_SLACK_MS = 60_000;
+
 const createEventBodySchema = z
   .object({
     mangaName: z.string().trim().min(1),
@@ -20,6 +23,10 @@ const createEventBodySchema = z
     // The series page this chapter belongs to, when the site exposes one. The
     // server derives the stored identity key from it; the raw URL is not kept.
     seriesUrl: z.url().optional(),
+    // When the chapter was read, for a report that arrives late: the
+    // extension keeps readings the backend was not there for and sends them
+    // when it is back. Omitted, it is now — which is every live report.
+    readAt: z.iso.datetime({ offset: true }).optional(),
   })
   // A title that is only the site naming itself is an interstitial, not a
   // manga — see isSiteNameTitle. Refused as a malformed request rather than
@@ -29,6 +36,15 @@ const createEventBodySchema = z
     path: ["mangaName"],
     error: "mangaName is the site's own name, not a manga",
   })
+  // The client runs on this same machine and shares its clock, so a reading
+  // from the future is a bug, not skew — refused before it can sort a card
+  // above everything read since. A minute of slack covers the round trip.
+  .refine(
+    (body) =>
+      body.readAt === undefined ||
+      Date.parse(body.readAt) <= Date.now() + MAX_CLOCK_SLACK_MS,
+    { path: ["readAt"], error: "readAt is in the future" },
+  )
   .openapi("CreateEventBody");
 
 const createEventResponseSchema = z
@@ -43,7 +59,11 @@ const postEventRoute = createRoute({
   path: "/events",
   tags: ["events"],
   request: {
+    // Required, so a body that is not JSON is refused with a 400. Optional,
+    // zod-openapi skips validation for another Content-Type and hands the
+    // handler `{}`, which it could only answer with a 500.
     body: {
+      required: true,
       content: { "application/json": { schema: createEventBodySchema } },
     },
   },
@@ -82,8 +102,11 @@ const streamRoute = createRoute({
 
 export const eventsRoutes = new OpenAPIHono({ defaultHook })
   .openapi(postEventRoute, async (c) => {
-    const body = c.req.valid("json");
-    const { manga, event, created } = await recordReadingEvent(body);
+    const { readAt, ...body } = c.req.valid("json");
+    const { manga, event, created } = await recordReadingEvent({
+      ...body,
+      ...(readAt !== undefined ? { readAt: new Date(readAt) } : {}),
+    });
     const payload = { manga: toMangaDto(manga), event: toEventDto(event) };
     return created ? c.json(payload, 201) : c.json(payload, 200);
   })

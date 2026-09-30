@@ -15,12 +15,17 @@
  *
  * Usage (every command prints a single JSON object):
  *   service-cli install --app-dir <dir> --data-dir <dir> [--port <n>]
+ *   service-cli repair --app-dir <dir> --data-dir <dir>
  *   service-cli status
  *   service-cli restart
  *   service-cli set-sync [--db <name>]      (connection string on stdin)
  *   service-cli use-stored-sync [--db <name>]
+ *   service-cli pin-config-secret
  *   service-cli clear-sync
  *   service-cli stop
+ *
+ * The four sync commands refuse on a machine with nothing installed, and `stop`
+ * fails when the service was still running once the wait ran out.
  *
  * `set-sync` reads the connection string from **stdin**, never from a flag.
  * This repo already holds that rule for `az` — a secret on the command line is
@@ -298,6 +303,25 @@ async function status(run: Runner, adapter: PlatformAdapter): Promise<Reply> {
 }
 
 /**
+ * Every sync command edits the service's configuration, so it needs one to
+ * edit.
+ *
+ * Without this, writing the first key simply created the file: on Windows a
+ * `use-stored-sync` before installing — the app offers it, because the DPAPI
+ * copy of an old credential survives an uninstall — wrote `prod.env`. `status`
+ * reads an existing configuration as an installed service, so a machine with
+ * nothing registered began reporting itself installed-but-stopped, and the app
+ * refused to install over it.
+ */
+async function requireInstalled(adapter: PlatformAdapter): Promise<void> {
+  if (!(await adapter.configExists())) {
+    throw new Error(
+      "Manga Tracker is not installed on this machine yet; install it before configuring sync",
+    );
+  }
+}
+
+/**
  * Sync is opt-in and personal: these are the user's own credentials, kept in the
  * system keystore, and nothing about them ships with the app.
  */
@@ -310,6 +334,7 @@ async function setSync(
   if (url === "") {
     throw new Error("no connection string was provided on stdin");
   }
+  await requireInstalled(adapter);
   const db = options.get("db") || "mangatracker";
   if (!(await adapter.writeSecret(run, url))) {
     throw new Error(
@@ -350,6 +375,7 @@ async function pinConfigSecret(
   run: Runner,
   adapter: PlatformAdapter,
 ): Promise<Reply> {
+  await requireInstalled(adapter);
   const stored = await adapter.readSecret(run);
   if (stored === null || stored === "") {
     throw new Error(
@@ -375,6 +401,7 @@ async function useStoredSync(
   adapter: PlatformAdapter,
   options: Map<string, string>,
 ): Promise<Reply> {
+  await requireInstalled(adapter);
   const stored = await adapter.readSecret(run);
   if (stored === null || stored === "") {
     throw new Error(
@@ -409,6 +436,7 @@ async function clearSync(
   run: Runner,
   adapter: PlatformAdapter,
 ): Promise<Reply> {
+  await requireInstalled(adapter);
   await writeEnvironment(run, adapter, new Map([["MONGODB_URL", ""]]));
   await adapter.reloadService(run);
   return { ok: true, syncConfigured: false };
@@ -448,8 +476,14 @@ export async function runCommand(
       return await clearSync(run, adapter);
     case "stop":
       // Separate from `restart` because an update has to extract over files the
-      // running service holds open — which fails outright on Windows.
-      await adapter.stopService(run);
+      // running service holds open — which fails outright on Windows. Said
+      // when it did not stop: the app goes on regardless, but a success here
+      // would be the one reply that is untrue.
+      if (!(await adapter.stopService(run))) {
+        throw new Error(
+          `${adapter.serviceLabel} was asked to stop and was still running after waiting for it`,
+        );
+      }
       return { ok: true, stopped: adapter.serviceLabel };
     default:
       throw new Error(
