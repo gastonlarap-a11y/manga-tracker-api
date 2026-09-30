@@ -8,7 +8,11 @@ import {
   libraryRoutes,
   mangaHistorySchema,
 } from "./library.routes";
-import { fetchMangaCover } from "./library.service";
+import {
+  fetchMangaCover,
+  MAX_COVER_IMAGE_BYTES,
+  readBounded,
+} from "./library.service";
 
 const libraryResponseSchema = z.array(libraryEntrySchema);
 
@@ -461,6 +465,29 @@ describe("fetchMangaCover", () => {
     expect(await fetchMangaCover(manga.id, fetchFn)).toBeNull();
   });
 
+  it("refuses an image too big to be a cover, and stores nothing", async () => {
+    // A coverUrl can point anywhere; it used to be read whole into memory
+    // and then into the database.
+    const manga = await seedCoveredManga();
+    const huge = new Uint8Array(MAX_COVER_IMAGE_BYTES + 1);
+    const fetchFn = async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(huge);
+            controller.close();
+          },
+        }),
+        { status: 200, headers: { "content-type": "image/webp" } },
+      );
+
+    expect(await fetchMangaCover(manga.id, fetchFn)).toBeNull();
+    const stored = await prisma.manga.findUniqueOrThrow({
+      where: { id: manga.id },
+    });
+    expect(stored.coverImage).toBeNull();
+  });
+
   it("returns null without fetching when there is no manga or no cover", async () => {
     const uncovered = await seedManga("no-cover", "No Cover", []);
     const fetchFn = async (): Promise<Response> => {
@@ -867,5 +894,45 @@ describe("merged mangas project as one card", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0].id).toBe(canonical.id);
     expect(entries[0].reachedChapter?.number).toBe(3);
+  });
+});
+
+describe("readBounded", () => {
+  const stream = (...chunks: Uint8Array[]) =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks) {
+            controller.enqueue(chunk);
+          }
+          controller.close();
+        },
+      }),
+    );
+
+  it("returns the whole body when it fits", async () => {
+    const body = await readBounded(
+      stream(new Uint8Array([1, 2]), new Uint8Array([3])),
+      10,
+    );
+
+    expect(new Uint8Array(body ?? new ArrayBuffer(0))).toEqual(
+      new Uint8Array([1, 2, 3]),
+    );
+  });
+
+  it("stops once the body grows past the limit, whatever the headers said", async () => {
+    // Streamed with no Content-Length: the count has to happen while reading.
+    expect(
+      await readBounded(stream(new Uint8Array(6), new Uint8Array(6)), 10),
+    ).toBeNull();
+  });
+
+  it("refuses up front a body that declares itself too big", async () => {
+    const response = new Response("x", {
+      headers: { "content-length": "999999999" },
+    });
+
+    expect(await readBounded(response, 10)).toBeNull();
   });
 });

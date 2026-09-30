@@ -296,6 +296,53 @@ const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
 const COVER_FETCH_TIMEOUT_MS = 10_000;
 
+/**
+ * A real cover is a few hundred KB; anything bigger is a wrong pick, not a
+ * cover. The same cap for bytes the extension uploads and bytes this server
+ * fetches itself — the proxy used to read whatever a coverUrl served, of any
+ * size, straight into memory and then into the database.
+ */
+export const MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024;
+
+/**
+ * The body of a response, or null once it grows past `max` bytes — read as a
+ * stream and stopped there, because a Content-Length can be missing or wrong.
+ */
+export async function readBounded(
+  response: Response,
+  max: number,
+): Promise<ArrayBuffer | null> {
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > max) {
+    return null;
+  }
+  if (response.body === null) {
+    return new ArrayBuffer(0);
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    size += value.byteLength;
+    if (size > max) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const body = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
+}
+
 // Only the call shape matters (Bun's `typeof fetch` also carries preconnect,
 // which would force every test mock to fake it).
 type FetchLike = (url: string, init?: RequestInit) => Promise<Response>;
@@ -369,7 +416,10 @@ export async function fetchMangaCover(
   if (!contentType.startsWith("image/")) {
     return null;
   }
-  const body = await response.arrayBuffer();
+  const body = await readBounded(response, MAX_COVER_IMAGE_BYTES);
+  if (body === null) {
+    return null;
+  }
   // First successful proxy fetch becomes permanent local bytes: the cover
   // survives referer changes, CDN policy changes and the site dying.
   await prisma.manga.update({

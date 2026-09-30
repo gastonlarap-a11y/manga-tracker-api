@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { psSingleQuoted } from "./quote";
 import type { Runner } from "./run";
 import { createFakeRunner, type FakeResponse } from "./run";
 import {
@@ -118,6 +119,32 @@ describe("readSecret / writeSecret", () => {
     const missing = join(tmpdir(), "mangatracker-no-such-secret.dpapi");
     expect(await readSecret(createFakeRunner([]).run, missing)).toBeNull();
   });
+
+  it("quotes a path with an apostrophe as PowerShell reads it", async () => {
+    // C:\Users\O'Brien: the ' ended the single-quoted literal early, and the
+    // rest of the command was a syntax error — no secret stored or read.
+    const dir = await mkdtemp(join(tmpdir(), "o'brien-"));
+    const path = join(dir, "mongodb-url.dpapi");
+    await Bun.write(path, "ciphertext");
+    const fake = createFakeRunner([{ when: ["powershell"], stdout: "value" }]);
+
+    try {
+      await readSecret(fake.run, path);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+
+    const command = (fake.calls[0] ?? []).at(-1) ?? "";
+    expect(command).toContain(`'${path.replaceAll("'", "''")}'`);
+  });
+});
+
+describe("psSingleQuoted", () => {
+  it("doubles the one character a single-quoted literal cannot hold", () => {
+    expect(psSingleQuoted("C:\\Users\\O'Brien\\x")).toBe(
+      "'C:\\Users\\O''Brien\\x'",
+    );
+  });
 });
 
 describe("readConfigEnv / writeConfigEnv", () => {
@@ -203,6 +230,24 @@ describe("installTask", () => {
     expect(xml).toContain(
       "<WorkingDirectory>C:\\Users\\gaston\\Documents\\Git\\manga-tracker-api</WorkingDirectory>",
     );
+  });
+
+  it("escapes a path that would otherwise break the XML", async () => {
+    // An & in a folder name made the whole task definition invalid, and
+    // schtasks refused it with an error that named neither the path nor the &.
+    const fake = recordingRunner();
+
+    await installTask(fake.run, {
+      bunPath: "C:\\Users\\Tom & Jerry\\bun.exe",
+      workingDirectory: "C:\\Users\\Tom & Jerry\\app",
+    });
+
+    const xml = fake.xml();
+    expect(xml).toContain("C:\\Users\\Tom &amp; Jerry\\bun.exe");
+    expect(xml).toContain(
+      "<WorkingDirectory>C:\\Users\\Tom &amp; Jerry\\app</WorkingDirectory>",
+    );
+    expect(xml).not.toContain("Tom & Jerry");
   });
 
   it("grants the user read+execute on the task file, and nothing more", async () => {

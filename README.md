@@ -45,8 +45,8 @@ finds this server by probing ports 5150-5159 and matching that `service` name.
 |---|---|---|
 | `DATABASE_URL` | yes | SQLite file location — the source of truth |
 | `PORT` | no (5150) | Port the API listens on, always bound to `127.0.0.1`. The CORS allowlist follows it, so a different port needs no other change. `0` is rejected: nothing could then find the server |
-| `EXTENSION_IDS` | no (the unpacked id) | Comma-separated Chrome extension ids allowed through CORS. Several at once, so a Web Store build and a locally loaded one can both talk to the backend. A malformed id fails startup instead of being skipped |
-| `MONGODB_URL` | no | Azure DocumentDB connection string, in direct `mongodb://host:10260/?tls=true&…` form — **not** `mongodb+srv://` (Bun on Windows returns `["127.0.0.1"]` from `dns.getServers()`, so every SRV lookup fails). **Unset means the replica is off** and the app behaves exactly as it did before it existed |
+| `EXTENSION_IDS` | no (both published ids: the unpacked one and the Web Store's) | Comma-separated Chrome extension ids allowed through CORS. Several at once, so a Web Store build and a locally loaded one can both talk to the backend. A malformed id fails startup instead of being skipped |
+| `MONGODB_URL` | no | Connection string of a MongoDB-compatible store you own (Atlas, …), in direct `mongodb://host:27017,…/?tls=true` form — **not** `mongodb+srv://` (Bun on Windows returns `["127.0.0.1"]` from `dns.getServers()`, so every SRV lookup fails; the desktop app converts one when you paste it). In an installed service the value is `keystore`: the launcher reads the real one from the Keychain or DPAPI at startup. **Unset means the replica is off** and the app behaves exactly as it did before it existed |
 | `MONGODB_DB` | no (`mangatracker`) | Database name inside the cluster |
 
 Production and development share this checkout, so they are kept apart by database name: the
@@ -95,6 +95,7 @@ other two are derived from the profile. Adding a variable means adding an entry 
 | `bun run env:pull` | Write `.env` for development, resolving secrets from Key Vault |
 | `bun run env:pull --prod` | Same, into the LaunchAgent plist |
 | `bun run env:show` | Print every profile and whether the files on disk match. Read-only, no network |
+| `bun run package -- --out <dir> [--dashboard <dist>]` | Build the shippable tree the desktop app bundles: `index.js`, `launch.js`, `service.js`, migrations, the native driver from `runtime/` |
 
 Useful flags: `deploy --with-env` refreshes the plist first, `deploy --skip-checks` skips
 lint/typecheck/tests, and every command takes `--vault <name>` to target a different vault.
@@ -112,7 +113,10 @@ lint/typecheck/tests, and every command takes `--vault <name>` to target a diffe
 - `scripts/` — operator tools run by hand (`sync:inspect`, `sync:bootstrap`)
 - `deploy/` — deployment and configuration tooling: `provision.ts` (Key Vault), `env-push.ts` /
   `env-pull.ts` (secrets), `deploy.ts` (the one-command publish), and `azure.json`, the committed
-  non-secret pointer to the resource group and vault
+  non-secret pointer to the resource group and vault. Two pieces of it ship inside the desktop
+  app: `service-cli.ts` (bundled as `service.js`, the service control the app spawns) and
+  `launcher.ts` (bundled as `launch.js`, what the installed service runs)
+- `runtime/` — the manifest and lockfile the shipped tree installs its native driver from
 - `public/` — static build of the web dashboard (gitignored; deployed from the sibling
   `manga-tracker-dashboard` repo), served by the API on `/`, `/manga/:id` and `/duplicates`
 - `PLAN.md`, `docs/` — implementation roadmap and module specs
@@ -171,8 +175,10 @@ not editing the same manga in two places at once.
 
 ### Credential recovery
 
-The connection string lives in the LaunchAgent plist (`chmod 600`), cached in the macOS Keychain,
-and stored in Azure Key Vault as `mangatracker-mongodb-url` inside the vault named in
+The connection string lives in the macOS Keychain (the LaunchAgent plist holds only
+`keystore`, which the launcher follows; older installs and the fallback for a service that
+cannot read its keystore hold it in the plist itself, `chmod 600`), and in Azure Key Vault as
+`mangatracker-mongodb-url` inside the vault named in
 [`deploy/azure.json`](deploy/azure.json). `bun run env:pull` resolves it in that order —
 cheapest first, network last — so a formatted machine only needs `az login`. `bun run env:push`
 sends it the other way. Key Vault has no per-secret fee and charges ~$0.03 per 10,000 operations,
@@ -194,10 +200,17 @@ vault gives you no access to its secrets, so without it the next write returns 4
 
 ## Deployment
 
-Runs permanently on the local Mac as a launchd LaunchAgent
-(`~/Library/LaunchAgents/com.mangatracker.plist`) executing `bun run src/index.ts` from this
-repo — no build step. The production database lives in
+Runs permanently as a launchd LaunchAgent (`~/Library/LaunchAgents/com.mangatracker.plist`) or,
+on Windows, a scheduled task. The production database lives in
 `~/Library/Application Support/MangaTracker/`.
+
+**On a machine the desktop app installed, the registered program is the app's
+`launch.js`**, under `…/MangaTracker/runtime/app/`, not this checkout. `bun run deploy` below
+migrates the production database and reloads *whatever is registered*, so there it does not
+switch the service to this checkout's code: the backend such a machine runs is updated by a
+desktop release, which bundles this repository at a pinned commit. The two share one service
+identity (label, plist, task name) on purpose — one backend per machine — which is also why
+the installer refuses to register over an existing one.
 
 ```bash
 bun run deploy

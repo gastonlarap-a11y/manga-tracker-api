@@ -2,7 +2,9 @@
 
 Local-first personal manga reading tracker — REST API in Bun + Hono 4 + Prisma 7 (SQLite via
 the libSQL adapter). Consumed by a browser extension (MV3) and a same-origin static web
-dashboard. Single instance by design: no cloud dependencies, no background scraping.
+dashboard. Single instance by design: nothing in the cloud is required and there is no
+background scraping. The one outward connection is opt-in sync to a MongoDB-compatible store
+the user owns, off unless configured.
 
 ## Layout
 - `src/index.ts` — entry point: builds the OpenAPIHono app, mounts modules, serves `/docs`
@@ -17,8 +19,9 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   `sync:bootstrap` (thin alias of `env:pull --prod`) and `package.ts` (builds the shippable
   tree; the smoke test and the desktop app's release both call it, so the thing CI proves and
   the thing people download are built by the same code)
-- `deploy/` — deployment and configuration tooling, outside `src/` because it never ships with
-  the app: `provision.ts` (Key Vault), `env-push.ts` / `env-pull.ts` (secrets), `deploy.ts` (the
+- `deploy/` — deployment and configuration tooling, outside `src/`. Mostly operator tools that
+  never ship — except the two pieces bundled into the desktop app's payload, named below:
+  `provision.ts` (Key Vault), `env-push.ts` / `env-pull.ts` (secrets), `deploy.ts` (the
   one-command publish), `service-cli.ts` (service control as a process — bundled as
   `service.js`, because the Go desktop app installs the backend by spawning it and reading one
   JSON object) and `launcher.ts` (bundled as `launch.js`, what the installed service actually
@@ -132,8 +135,9 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   drifted from `bun.lock`. Bumping `@prisma/adapter-libsql` means the same exact version in
   `runtime/package.json`, then `bun install --lockfile-only` there.
 - Nothing in `src/` may import from `deploy/`; the reverse is allowed **only for pure constants
-  and parsers in `src/lib/`** that describe a value both sides handle — today `parsePort` and
-  `UNPACKED_EXTENSION_ID`. The manifest declares a default that `src/config.ts` also falls back
+  and parsers in `src/lib/`** that describe a value both sides handle — today `parsePort`,
+  `candidatePorts` and `DEFAULT_PORT` (`src/lib/port.ts`) and `DEFAULT_EXTENSION_IDS`
+  (`src/lib/cors.ts`). The manifest declares a default that `src/config.ts` also falls back
   to, and a second copy of that value drifts exactly once: the day the extension goes silent for
   no visible reason. Anything with a side effect stays on its own side of the line.
 - **A JSON request body is declared `required: true`.** Optional, zod-openapi skips validation
@@ -166,8 +170,10 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   `scripts/package.ts --dashboard <dist>` puts it there and the smoke test now asserts `/`
   returns the dashboard and that its assets resolve.
 - `deploy/service-cli.ts` and `deploy/launcher.ts` are the two parts of `deploy/` that ship.
-  Their adapter is a parameter rather than `process.platform`, so the suite exercises both
-  platforms from either — and so no test can overwrite the LaunchAgent of whoever runs it.
+  Their outside world is a parameter — the service CLI's adapter rather than
+  `process.platform`, the launcher's `LaunchDeps` (keystore, environment, import, serve) — so
+  the suite exercises both platforms from either, and no test can overwrite the LaunchAgent
+  or the environment of whoever runs it.
 - **The service starts `launch.js`, not `index.js`.** The launcher reads the sync credential out
   of the system keystore and puts it in the server's environment in memory, so the service's own
   configuration never holds it. It serves in the same process — `Bun.serve(indexModule.default)`
@@ -275,6 +281,8 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   `process.getuid` takes it as a parameter (see `PlatformAdapter.os` and `ReloadOptions.uid`)
   so the test pins it, exactly like `Runner` pins the commands.
 - Handle errors explicitly at boundaries: route handlers translate failures into HTTP
-  responses; services never swallow exceptions.
+  responses; services never swallow exceptions. An expected failure mapped to a documented
+  result — an upstream cover that cannot be fetched is `null`, which the route serves as a 404
+  — is handling, and the `catch` says so in a comment.
 - No speculative abstractions: introduce a pattern only for a problem this repo has, and say
   which and why.

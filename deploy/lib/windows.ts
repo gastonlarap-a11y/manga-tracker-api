@@ -18,6 +18,7 @@ import { join } from "node:path";
 // From env-file, never env: this module ships inside service.js and launch.js,
 // and env.ts carries the operator manifest, which must not.
 import { type EnvLine, parseEnvFile, serializeEnvFile } from "./env-file";
+import { psSingleQuoted, xmlEscape } from "./quote";
 import type { Runner } from "./run";
 
 export const TASK_NAME = "MangaTracker";
@@ -119,7 +120,7 @@ export async function readSecret(
     "-NoProfile",
     "-NonInteractive",
     "-Command",
-    `$enc = Get-Content -Raw -Path '${path}'; ` +
+    `$enc = Get-Content -Raw -Path ${psSingleQuoted(path)}; ` +
       `$secure = ConvertTo-SecureString -String $enc; ` +
       "$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure); " +
       "[Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)",
@@ -145,10 +146,10 @@ export async function writeSecret(
       "-NoProfile",
       "-NonInteractive",
       "-Command",
-      `$plain = Get-Content -Raw -Path '${file}'; ` +
+      `$plain = Get-Content -Raw -Path ${psSingleQuoted(file)}; ` +
         `$secure = ConvertTo-SecureString -String $plain -AsPlainText -Force; ` +
-        `New-Item -ItemType Directory -Force -Path '${SECRET_DIR}' | Out-Null; ` +
-        `ConvertFrom-SecureString -SecureString $secure | Set-Content -NoNewline -Path '${SECRET_PATH}'`,
+        `New-Item -ItemType Directory -Force -Path ${psSingleQuoted(SECRET_DIR)} | Out-Null; ` +
+        `ConvertFrom-SecureString -SecureString $secure | Set-Content -NoNewline -Path ${psSingleQuoted(SECRET_PATH)}`,
     ]);
     return result.ok;
   } finally {
@@ -333,7 +334,17 @@ export async function installTask(
     entry = "src\\index.ts",
   }: InstallTaskOptions,
 ): Promise<InstallTaskOutcome> {
-  const user = `${process.env.COMPUTERNAME ?? ""}\\${userInfo().username}`;
+  // Escaped, all of it: these come from the machine — a user name, a home
+  // directory — and an `&` in any of them made the whole definition invalid.
+  const user = xmlEscape(
+    `${process.env.COMPUTERNAME ?? ""}\\${userInfo().username}`,
+  );
+  const exe = xmlEscape(bunPath);
+  const config = xmlEscape(CONFIG_PATH);
+  const script = xmlEscape(entry);
+  const outLog = xmlEscape(OUT_LOG_PATH);
+  const errLog = xmlEscape(LOG_PATH);
+  const cwd = xmlEscape(workingDirectory);
   const xml = `<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
@@ -367,8 +378,8 @@ export async function installTask(
   <Actions Context="Author">
     <Exec>
       <Command>cmd.exe</Command>
-      <Arguments>/c ""${bunPath}" --env-file="${CONFIG_PATH}" run "${entry}" >> "${OUT_LOG_PATH}" 2>> "${LOG_PATH}""</Arguments>
-      <WorkingDirectory>${workingDirectory}</WorkingDirectory>
+      <Arguments>/c ""${exe}" --env-file="${config}" run "${script}" >> "${outLog}" 2>> "${errLog}""</Arguments>
+      <WorkingDirectory>${cwd}</WorkingDirectory>
     </Exec>
   </Actions>
 </Task>`;

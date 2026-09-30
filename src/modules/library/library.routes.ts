@@ -15,13 +15,10 @@ import {
   fetchMangaCover,
   getLibrary,
   getMangaHistory,
+  MAX_COVER_IMAGE_BYTES,
   storeMangaCoverImage,
   updateManga,
 } from "./library.service";
-
-// A real cover is a few hundred KB; anything bigger is a wrong pick, not a
-// cover.
-const MAX_COVER_IMAGE_BYTES = 5 * 1024 * 1024;
 
 export const libraryEntrySchema = z
   .object({

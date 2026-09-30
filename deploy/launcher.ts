@@ -31,37 +31,71 @@ interface ServerConfig {
   fetch: (request: Request) => Response | Promise<Response>;
 }
 
+/**
+ * Everything the launcher touches, as parameters with the real ones as
+ * defaults — the same reason the service CLI takes its adapter: so a test can
+ * run the whole sequence without a keystore, a server, or the environment of
+ * whoever runs it.
+ */
+export interface LaunchDeps {
+  /** Where the configuration is read from. */
+  readonly env?: Record<string, string | undefined>;
+  /** Where the credential is put for the server to find. */
+  readonly target?: Record<string, string | undefined>;
+  readonly readSecret?: () => Promise<string | null>;
+  readonly secretCacheLabel?: string;
+  readonly importServer?: (path: string) => Promise<{ default: ServerConfig }>;
+  readonly serve?: (config: ServerConfig) => unknown;
+  readonly log?: Pick<Console, "info" | "error">;
+  /** Passed to resolveSyncSecret, so a test does not sleep through its retries. */
+  readonly retryWaitMs?: number;
+}
+
 export async function launch(
   serverPath: string,
-  env: Record<string, string | undefined> = Bun.env,
+  {
+    env = Bun.env,
+    target = process.env,
+    readSecret = () => platform.readSecret(spawnRunner),
+    secretCacheLabel = platform.secretCacheLabel,
+    // The specifier is a variable so the bundler leaves it alone — index.js is
+    // a separate file in the shipped tree, not something to inline here.
+    // Cast justified: index.js is this repo's own bundle, whose default export
+    // is the Bun server config src/index.ts declares.
+    importServer = async (path) =>
+      (await import(path)) as { default: ServerConfig },
+    serve = (config) => Bun.serve(config),
+    log = console,
+    retryWaitMs,
+  }: LaunchDeps = {},
 ): Promise<void> {
-  const resolved = await resolveSyncSecret(env.MONGODB_URL, () =>
-    platform.readSecret(spawnRunner),
+  const resolved = await resolveSyncSecret(
+    env.MONGODB_URL,
+    readSecret,
+    undefined,
+    retryWaitMs,
   );
 
   if (resolved.url === "") {
     // Deleted rather than left as the sentinel: `config.ts` treats any
     // non-empty value as a connection string, and would hand "keystore" to the
     // driver as if it were one.
-    delete process.env.MONGODB_URL;
+    delete target.MONGODB_URL;
     if ((env.MONGODB_URL ?? "") !== "") {
-      console.error(
-        `[launcher] sync is configured but the credential could not be read from the ${platform.secretCacheLabel}; starting without it`,
+      log.error(
+        `[launcher] sync is configured but the credential could not be read from the ${secretCacheLabel}; starting without it`,
       );
     }
   } else {
-    process.env.MONGODB_URL = resolved.url;
-    console.info(`[launcher] sync credential read from the ${resolved.source}`);
+    target.MONGODB_URL = resolved.url;
+    log.info(`[launcher] sync credential read from the ${resolved.source}`);
   }
 
   // Imported after the environment is set: `config.ts` reads it at import time,
   // and `index.ts` starts its scheduler and applies its migrations the moment
   // it is loaded.
-  //
-  // The specifier is a variable so the bundler leaves it alone — index.js is a
-  // separate file in the shipped tree, not something to inline here.
-  const server = (await import(serverPath)) as { default: ServerConfig };
-  Bun.serve(server.default);
+  const server = await importServer(serverPath);
+  serve(server.default);
 }
 
 // Bun starts a server from an entrypoint's default export, and only an
