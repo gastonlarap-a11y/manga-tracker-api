@@ -6,6 +6,8 @@
 import { chmod, mkdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+// `&`, `<` and `>` are the three that make a plist unparseable; a path may hold any.
+import { xmlEscape } from "./quote";
 import type { Runner } from "./run";
 
 export const LAUNCHD_LABEL = "com.mangatracker";
@@ -100,13 +102,6 @@ export interface WritePlistOptions {
   readonly label?: string;
   readonly path?: string;
 }
-
-/** `&`, `<` and `>` are the three that make a plist unparseable; a path may hold any. */
-const xmlEscape = (value: string): string =>
-  value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;");
 
 /**
  * Creates the LaunchAgent definition from nothing.

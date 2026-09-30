@@ -164,6 +164,25 @@ async function writeEnvironment(
 }
 
 /**
+ * A port given with `--port`, refused unless something could find it there.
+ *
+ * `parsePort` accepts any port the operating system would, which is right for
+ * a checkout run by hand. An installed backend is found by probing 5150-5159 —
+ * the desktop app and the extension both search exactly that range — so a
+ * service registered on 8080 would run perfectly and never be reached.
+ */
+function discoverablePort(raw: string | undefined): number {
+  const port = parsePort(raw);
+  const ports = candidatePorts();
+  if (!ports.includes(port)) {
+    throw new Error(
+      `--port ${port} is outside ${ports[0]}-${ports.at(-1)}, the only ports the desktop app and the extension look for the backend on`,
+    );
+  }
+  return port;
+}
+
+/**
  * `launch.js`, not `index.js`: the launcher reads the credential out of the
  * system keystore and puts it in the server's environment, so the service's own
  * configuration never has to hold it. See deploy/launcher.ts.
@@ -178,7 +197,7 @@ async function install(
   const appDir = required(options, "app-dir");
   const dataDir = required(options, "data-dir");
   const port = options.has("port")
-    ? parsePort(options.get("port"))
+    ? discoverablePort(options.get("port"))
     : await firstFreePort();
 
   // The database lives here and the server does not create the directory.

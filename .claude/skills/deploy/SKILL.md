@@ -91,9 +91,14 @@ production database. Its env vars win over `.env`, so the same checkout serves b
 | plist / `prod.env` | `mangatracker` | Production syncs |
 | `.env` | `mangatracker_dev` | Dev syncs somewhere harmless |
 
-- The plist (macOS) holds the cluster password in plaintext → the tooling keeps it `chmod 600`.
-  The Windows `prod.env` gets the equivalent treatment via `icacls` (real ACLs — Windows'
-  `chmod` only toggles the read-only bit, it can't restrict to one user).
+- The plist (macOS) / `prod.env` (Windows) holds `MONGODB_URL=keystore`, a pointer: the
+  launcher reads the real value from the Keychain / DPAPI at startup. Only older installs and
+  the `pin-config-secret` fallback hold the password itself, which is why the tooling still
+  keeps the file `chmod 600` — and the Windows `prod.env` locked with `icacls` (real ACLs —
+  Windows' `chmod` only toggles the read-only bit, it can't restrict to one user). Never
+  "fix" a `keystore` value by writing the password over it.
+- On a machine the desktop app installed, the service runs the app's `launch.js`, and
+  `bun run deploy` reloads that — it does not switch the service to this checkout.
 - Inspect what the cluster actually holds: `bun run sync:inspect` (add a database name to look
   at another, e.g. `bun run sync:inspect mangatracker_dev`).
 - Check the sync took: `curl -s http://127.0.0.1:5150/api/sync/status`

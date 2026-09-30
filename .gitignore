@@ -24,3 +24,7 @@ node_modules/
 CLAUDE.local.md
 .claude/settings.local.json
 .claude/.cc-writes/
+
+# A copy of .claude/skills that a tool mirrors here (the cross-agent .agents/
+# convention). .claude/skills is the source; the copy drifts and must not ship.
+.agents/

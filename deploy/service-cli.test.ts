@@ -263,6 +263,23 @@ describe("install", () => {
     ).rejects.toThrow(/--data-dir/);
   });
 
+  it("refuses a port nothing would look for it on", async () => {
+    // The app and the extension search 5150-5159. A service registered on
+    // 8080 would run perfectly and never be found.
+    await inTempDir(async (dir) => {
+      const fake = fakeAdapter("darwin");
+
+      await expect(
+        runCommand(
+          runner(),
+          ["install", "--app-dir", "/a", "--data-dir", dir, "--port", "8080"],
+          fake.adapter,
+        ),
+      ).rejects.toThrow(/5150-5159/);
+      expect(fake.steps).toEqual([]);
+    });
+  });
+
   it("rejects a port outside what anything can reach", async () => {
     await inTempDir(async (dir) => {
       const fake = fakeAdapter("darwin");
