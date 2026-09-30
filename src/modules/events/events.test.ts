@@ -71,6 +71,63 @@ describe("POST /events", () => {
     expect(body.event.mangaId).toBe(body.manga.id);
   });
 
+  it("keeps the time a late report says the chapter was read", async () => {
+    // The extension's outbox delivers readings the backend was not there
+    // for. Stamping them with the arrival time would sort them above
+    // everything actually read since.
+    const readAt = "2026-09-30T08:15:00.000Z";
+
+    const res = await postEvent({
+      mangaName: "Vagabond",
+      chapterLabel: "Cap. 3",
+      sourceUrl: "https://olympusxyz.com/vagabond/3",
+      readAt,
+    });
+
+    expect(res.status).toBe(201);
+    const body = createEventResponseSchema.parse(await res.json());
+    expect(body.event.readAt).toBe(readAt);
+  });
+
+  it("stamps a live report with the time it arrives", async () => {
+    const before = Date.now();
+
+    const res = await postEvent({
+      mangaName: "Vagabond",
+      chapterLabel: "Cap. 4",
+      sourceUrl: "https://olympusxyz.com/vagabond/4",
+    });
+
+    const body = createEventResponseSchema.parse(await res.json());
+    expect(Date.parse(body.event.readAt)).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  it("refuses a reading from the future", async () => {
+    // Client and server share this machine's clock, so this is a bug, not
+    // skew — and it would sort one card above everything read since.
+    const res = await postEvent({
+      mangaName: "Vagabond",
+      chapterLabel: "Cap. 5",
+      sourceUrl: "https://olympusxyz.com/vagabond/5",
+      readAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    });
+
+    expect(res.status).toBe(400);
+    expect(errorSchema.parse(await res.json()).error).toContain("readAt");
+  });
+
+  it("refuses a body that is not JSON with a 400, not a crash", async () => {
+    // Optional, the body was skipped for another Content-Type and the handler
+    // got {}, which it could only answer with a 500.
+    const res = await eventsRoutes.request("/events", {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "mangaName=Vagabond",
+    });
+
+    expect(res.status).toBe(400);
+  });
+
   it("deduplicates mangas by normalized slug", async () => {
     const first = createEventResponseSchema.parse(
       await (

@@ -120,6 +120,13 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   `UNPACKED_EXTENSION_ID`. The manifest declares a default that `src/config.ts` also falls back
   to, and a second copy of that value drifts exactly once: the day the extension goes silent for
   no visible reason. Anything with a side effect stays on its own side of the line.
+- **A JSON request body is declared `required: true`.** Optional, zod-openapi skips validation
+  for any other Content-Type and hands the handler `{}` — a 500 for what is a bad request.
+  `POST /api/events` takes an optional `readAt` for a report delivered late (the extension's
+  outbox); absent is now, and one in the future is refused. Sync pushes events by id, not by
+  time, so a late `readAt` still reaches the shared store.
+- **The service CLI's sync commands need an installed service** (`requireInstalled`). Writing
+  the first key used to create the configuration, which `status` reads as installed.
 - **CORS is not the guard; `src/lib/local-guard.ts` is.** CORS decides what a page may *read*, and
   a simple cross-origin request is sent without asking: `POST /api/sync/restore?force=true` has
   no body, so any open page could fire it at 127.0.0.1. `hono/csrf` refuses an unsafe,

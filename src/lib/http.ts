@@ -32,10 +32,14 @@ export const defaultHook: Hook<unknown, Env, string, Response | undefined> = (
  * Folding it into a 500 told a refused request that the server had crashed,
  * and logged a stack trace for what was never a fault. Everything else really
  * is one, and is logged as such.
+ *
+ * Either way the body is the `{ error }` every client already reads. An
+ * exception that carries only a prepared response (csrf's) lends it its text.
  */
-export const errorHandler: ErrorHandler = (err, c) => {
+export const errorHandler: ErrorHandler = async (err, c) => {
   if (err instanceof HTTPException) {
-    return err.getResponse();
+    const error = err.message || (await err.getResponse().text());
+    return c.json({ error }, err.status);
   }
   console.error(`[Unhandled Error] ${err.message}`, err.stack);
   return c.json({ error: "Internal Server Error" }, 500);

@@ -59,7 +59,9 @@ const postAdapterRoute = createRoute({
   path: "/adapters",
   tags: ["adapters"],
   request: {
+    // Required so a non-JSON body is a 400, not {} and a 500: see events.routes.ts.
     body: {
+      required: true,
       content: { "application/json": { schema: upsertAdapterBodySchema } },
     },
   },

@@ -56,8 +56,12 @@ export interface PlatformAdapter {
    * Stops the service and waits until it has really stopped. Separate from
    * reloadService because an update has to replace files the running backend
    * holds open, which on Windows fails while the process is alive.
+   *
+   * False when it was still running once the wait ran out. reloadService
+   * carries on regardless — its own retries cover a slow teardown — but the
+   * `stop` command must not report a success it did not see.
    */
-  stopService(run: Runner): Promise<void>;
+  stopService(run: Runner): Promise<boolean>;
   /**
    * Creates the service definition on a machine that has never had one. Every
    * other method here edits something that already exists — which held while a

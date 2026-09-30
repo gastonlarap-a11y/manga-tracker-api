@@ -65,6 +65,7 @@ function fakeAdapter(
     },
     stopService: async () => {
       steps.push("stop");
+      return true;
     },
     installService: async (_run, options) => {
       steps.push("define");
@@ -85,6 +86,19 @@ function fakeAdapter(
       return secret;
     },
   };
+}
+
+/**
+ * A machine whose service is already registered — the only kind a sync command
+ * may touch. A configuration that exists is what `status` reads as installed.
+ */
+function installedFake(
+  os: NodeJS.Platform,
+  overrides: Partial<PlatformAdapter> = {},
+) {
+  const fake = fakeAdapter(os, overrides);
+  fake.written.set("PORT", "5150");
+  return fake;
 }
 
 const runner = () => createFakeRunner([]).run;
@@ -418,7 +432,7 @@ describe("hostOf", () => {
 
 describe("sync", () => {
   it("puts the credential in the system keystore, not only in the config", async () => {
-    const fake = fakeAdapter("darwin");
+    const fake = installedFake("darwin");
 
     await runCommand(
       runner(),
@@ -438,7 +452,7 @@ describe("sync", () => {
     // but permanently, and it had to be, because launchd and `bun --env-file`
     // can only hand a process a string. Now the file records that sync is on
     // and nothing else.
-    const fake = fakeAdapter("darwin");
+    const fake = installedFake("darwin");
 
     await runCommand(
       runner(),
@@ -458,7 +472,7 @@ describe("sync", () => {
     // a Windows task running as S4U may not be able to unwrap a DPAPI blob.
     // Nothing about that is knowable in advance, so it is discovered by trying
     // and coming back here.
-    const fake = fakeAdapter("darwin");
+    const fake = installedFake("darwin");
     await runCommand(
       runner(),
       ["set-sync"],
@@ -478,7 +492,7 @@ describe("sync", () => {
   });
 
   it("refuses to pin a credential this machine does not have", async () => {
-    const fake = fakeAdapter("darwin");
+    const fake = installedFake("darwin");
 
     await expect(
       runCommand(runner(), ["pin-config-secret"], fake.adapter),
@@ -486,7 +500,7 @@ describe("sync", () => {
   });
 
   it("defaults the database name so the user only supplies a URL", async () => {
-    const fake = fakeAdapter("darwin");
+    const fake = installedFake("darwin");
 
     await runCommand(
       runner(),
@@ -501,7 +515,7 @@ describe("sync", () => {
   it("turns sync off by blanking the URL", async () => {
     // Blank rather than removed: an absent key and an empty one have to mean
     // the same thing to the reader, and only one of them is writable here.
-    const fake = fakeAdapter("darwin");
+    const fake = installedFake("darwin");
     await runCommand(
       runner(),
       ["set-sync"],
@@ -581,7 +595,7 @@ describe("the credential this machine already had", () => {
   });
 
   it("turns sync back on from the keystore", async () => {
-    const fake = fakeAdapter("darwin");
+    const fake = installedFake("darwin");
     await runCommand(
       runner(),
       ["set-sync"],
@@ -611,7 +625,7 @@ describe("the credential this machine already had", () => {
   it("flags a stored srv URL instead of refusing it", async () => {
     // It works on macOS and never connects on Windows. Refusing would break a
     // setup that is working today; saying nothing would repeat the problem.
-    const fake = fakeAdapter("darwin", {
+    const fake = installedFake("darwin", {
       readSecret: async () => "mongodb+srv://cluster.example.com/db",
     });
 
@@ -621,11 +635,42 @@ describe("the credential this machine already had", () => {
   });
 
   it("says so plainly when there is nothing stored", async () => {
-    const fake = fakeAdapter("darwin");
+    const fake = installedFake("darwin");
 
     await expect(
       runCommand(runner(), ["use-stored-sync"], fake.adapter),
     ).rejects.toThrow(/no credential is stored/);
+  });
+});
+
+describe("sync on a machine with nothing installed", () => {
+  // Writing the first key used to create the configuration, and an existing
+  // configuration is what `status` calls installed: on Windows, "use the one I
+  // had" before installing left a machine that said it was installed and
+  // stopped, and refused the install that would have fixed it.
+  it.each([
+    ["set-sync"],
+    ["use-stored-sync"],
+    ["pin-config-secret"],
+    ["clear-sync"],
+  ])("refuses %s and writes nothing", async (command) => {
+    const fake = fakeAdapter("win32", {
+      readSecret: async () => "mongodb://host/db",
+    });
+
+    await expect(
+      runCommand(
+        runner(),
+        [command],
+        fake.adapter,
+        onStdin("mongodb://host/db"),
+      ),
+    ).rejects.toThrow(/not installed/);
+    expect(fake.written.size).toBe(0);
+    expect(fake.steps).toEqual([]);
+
+    const status = await runCommand(runner(), ["status"], fake.adapter);
+    expect(status).toMatchObject({ installed: false });
   });
 });
 
@@ -639,6 +684,16 @@ describe("stop", () => {
 
     expect(reply).toMatchObject({ ok: true });
     expect(fake.steps).toEqual(["stop"]);
+  });
+
+  it("says so when the service was still running after the wait", async () => {
+    // It used to answer ok regardless. The app updates either way, but a
+    // success it never saw is the one reply that must not be sent.
+    const fake = fakeAdapter("darwin", { stopService: async () => false });
+
+    await expect(runCommand(runner(), ["stop"], fake.adapter)).rejects.toThrow(
+      /still running/,
+    );
   });
 });
 
