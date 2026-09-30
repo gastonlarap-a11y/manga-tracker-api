@@ -164,6 +164,26 @@ async function writeEnvironment(
 }
 
 /**
+ * The port an existing configuration already names, when it is one something
+ * could find the backend on. Null on a machine with none, or with a port
+ * outside the range, which a fresh pick then replaces.
+ */
+async function configuredPort(
+  run: Runner,
+  adapter: PlatformAdapter,
+): Promise<number | null> {
+  if (!(await adapter.configExists())) {
+    return null;
+  }
+  const raw = await adapter.readConfigEnv(run, "PORT");
+  if (raw === null || raw === "") {
+    return null;
+  }
+  const port = parsePort(raw);
+  return candidatePorts().includes(port) ? port : null;
+}
+
+/**
  * A port given with `--port`, refused unless something could find it there.
  *
  * `parsePort` accepts any port the operating system would, which is right for
@@ -196,9 +216,13 @@ async function install(
 ): Promise<Reply> {
   const appDir = required(options, "app-dir");
   const dataDir = required(options, "data-dir");
+  // Installing over an existing service keeps its port, the way repair does.
+  // Picked afresh, the free-port probe skipped the port that very service was
+  // bound to and moved the backend to the next one — out from under the
+  // extension's cached port and the window that had it open.
   const port = options.has("port")
     ? discoverablePort(options.get("port"))
-    : await firstFreePort();
+    : ((await configuredPort(run, adapter)) ?? (await firstFreePort()));
 
   // The database lives here and the server does not create the directory.
   await mkdir(dataDir, { recursive: true });

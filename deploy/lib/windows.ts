@@ -80,11 +80,28 @@ export async function writeConfigEnv(
   path = CONFIG_PATH,
 ): Promise<boolean> {
   const file = Bun.file(path);
-  const existing = (await file.exists()) ? await file.text() : "";
+  const existed = await file.exists();
+  // A new file is created empty and locked to this account before anything
+  // goes into it. Written first and locked after, it sat readable by every
+  // account for the moment in between — and the first value written may be
+  // the credential, on the fallback that keeps it in this file.
+  if (!existed) {
+    await Bun.write(path, "");
+    if (!(await lockToUser(run, path))) {
+      return false;
+    }
+  }
+  const existing = existed ? await file.text() : "";
   await Bun.write(
     path,
     serializeEnvFile(upsertRaw(parseEnvFile(existing), key, value)),
   );
+  // Re-applied on every write, as it always was: cheap, and it repairs a file
+  // whose permissions were loosened by hand.
+  return await lockToUser(run, path);
+}
+
+async function lockToUser(run: Runner, path: string): Promise<boolean> {
   const result = await run([
     "icacls",
     path,

@@ -263,6 +263,24 @@ describe("install", () => {
     ).rejects.toThrow(/--data-dir/);
   });
 
+  it("keeps the port of a service it is installed over", async () => {
+    // The free-port probe skips the port the running service holds, so a
+    // fresh pick moved the backend out from under the extension's cache.
+    await inTempDir(async (dir) => {
+      const fake = installedFake("darwin");
+      fake.written.set("PORT", "5157");
+
+      const reply = await runCommand(
+        runner(),
+        ["install", "--app-dir", "/a", "--data-dir", dir],
+        fake.adapter,
+      );
+
+      expect(reply).toMatchObject({ ok: true, port: 5157 });
+      expect(fake.written.get("PORT")).toBe("5157");
+    });
+  });
+
   it("refuses a port nothing would look for it on", async () => {
     // The app and the extension search 5150-5159. A service registered on
     // 8080 would run perfectly and never be found.

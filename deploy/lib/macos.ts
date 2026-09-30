@@ -174,8 +174,19 @@ export async function readPlistEnv(
 }
 
 /**
- * Re-tightens permissions on every write: the plist holds the cluster password
- * in plaintext and launchd creates it world-readable by default.
+ * Sets one environment variable in the plist without the value reaching argv.
+ *
+ * `plutil -replace <key> -string <value>` put it on the command line, readable
+ * by every process on the machine through `ps` — and one of the values written
+ * here is the cluster password, on the fallback path that keeps it in the
+ * plist. So the plist is read out as JSON (stdout), the one key is set in
+ * memory, and the whole of it is written back from stdin, which `plutil`
+ * accepts as `-`. A LaunchAgent plist holds strings, arrays, booleans and
+ * integers, all of which survive the trip; one with `<data>` or `<date>` would
+ * not convert, and fails here rather than being half-written.
+ *
+ * Re-tightens permissions on every write: the plist may hold the cluster
+ * password and launchd creates it world-readable by default.
  */
 export async function writePlistEnv(
   run: Runner,
@@ -183,18 +194,35 @@ export async function writePlistEnv(
   value: string,
   path = PLIST_PATH,
 ): Promise<boolean> {
-  const result = await run([
-    "plutil",
-    "-replace",
-    `${PLIST_ENV}.${key}`,
-    "-string",
-    value,
-    path,
-  ]);
-  if (result.ok) {
+  const current = await run(["plutil", "-convert", "json", "-o", "-", path]);
+  if (!current.ok) {
+    return false;
+  }
+  let plist: Record<string, unknown>;
+  try {
+    // Cast justified: plutil -convert json of a plist whose root is a dict,
+    // which a LaunchAgent's always is; anything else fails the check below.
+    plist = JSON.parse(current.stdout) as Record<string, unknown>;
+  } catch {
+    // Not JSON means plutil did not convert it: nothing was written yet, and
+    // the caller reports the write as failed.
+    return false;
+  }
+  if (typeof plist !== "object" || plist === null || Array.isArray(plist)) {
+    return false;
+  }
+  const existing = plist[PLIST_ENV];
+  plist[PLIST_ENV] = {
+    ...(typeof existing === "object" && existing !== null ? existing : {}),
+    [key]: value,
+  };
+  const written = await run(["plutil", "-convert", "xml1", "-o", path, "-"], {
+    stdin: JSON.stringify(plist),
+  });
+  if (written.ok) {
     await chmod(path, 0o600);
   }
-  return result.ok;
+  return written.ok;
 }
 
 // ---------------------------------------------------------------------------
