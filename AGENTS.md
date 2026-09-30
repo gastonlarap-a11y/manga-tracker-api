@@ -12,6 +12,7 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   (plus extra colocated units when needed, e.g. `events/events.bus.ts`)
 - `src/modules/sync/` — optional two-way sync with Azure DocumentDB (`sync.target.ts` is the ONLY
   file allowed to import `mongodb`; `sync.mapper.ts` is pure and driver-free)
+- `runtime/` — the manifest and lockfile the shipped tree installs its native driver from
 - `scripts/` — operator tools run by hand: `sync:inspect` (what the shared store holds),
   `sync:bootstrap` (thin alias of `env:pull --prod`) and `package.ts` (builds the shippable
   tree; the smoke test and the desktop app's release both call it, so the thing CI proves and
@@ -114,7 +115,22 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   fails with `Bootstrap failed: 5: Input/output error` and leaves production down.
 - `deploy/` talks to the outside world only through the `Runner` in `deploy/lib/run.ts`, so
   command construction stays testable without an Azure subscription. Secrets go to `az` through
-  a 0600 temp file, never `--value`, which `ps` would expose.
+  a 0600 temp file, never `--value`, which `ps` would expose. The Keychain gets them on stdin:
+  `security -i` with `add-generic-password -X <hex>` (the `Runner`'s `stdin` option), read back
+  to confirm because interactive mode exits 0 over a failed command; never `-v`, which echoes
+  the value. Still on argv: `plutil -replace -string` in `pin-config-secret`/`repair`, the
+  degraded path that writes the credential into the plist anyway.
+- **`"keystore"` in the configuration is a pointer, not a value.** Every reader outside the
+  launcher goes through `credentialIn` (`deploy/lib/sync-secret.ts`); read as the credential,
+  `env:pull --prod` cached the word over the Keychain and `env:push` uploaded it to Key Vault.
+  `env:pull --prod` also leaves a sentinel in place instead of writing the plaintext back.
+- **Nothing a bundle imports may pull in `deploy/lib/env.ts`**, the operator manifest (Key
+  Vault secret name, dev database). The `.env` format lives in `deploy/lib/env-file.ts` for the
+  shipped modules; the smoke test greps the package for what the manifest holds.
+- **The shipped native driver installs from `runtime/`** (`package.json` + `bun.lock`,
+  committed, `--frozen-lockfile`), and `scripts/package.ts` refuses a runtime lock that has
+  drifted from `bun.lock`. Bumping `@prisma/adapter-libsql` means the same exact version in
+  `runtime/package.json`, then `bun install --lockfile-only` there.
 - Nothing in `src/` may import from `deploy/`; the reverse is allowed **only for pure constants
   and parsers in `src/lib/`** that describe a value both sides handle — today `parsePort` and
   `UNPACKED_EXTENSION_ID`. The manifest declares a default that `src/config.ts` also falls back

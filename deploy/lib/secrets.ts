@@ -11,6 +11,7 @@ import { getSecret, isAzInstalled, setSecret } from "./az";
 import type { EnvSpec } from "./env";
 import type { PlatformAdapter } from "./platform";
 import type { Runner } from "./run";
+import { credentialIn, KEYSTORE_SENTINEL } from "./sync-secret";
 
 export type SecretOrigin = "config" | "cache" | "keyvault";
 
@@ -35,7 +36,15 @@ export async function resolveSecret(
   spec: SecretSpec,
   { vault, platform, cache = true, onStep = () => {} }: ResolveOptions,
 ): Promise<ResolvedSecret | null> {
-  const fromConfig = await platform.readConfigEnv(run, spec.name);
+  const configured = await platform.readConfigEnv(run, spec.name);
+  if (configured === KEYSTORE_SENTINEL) {
+    onStep(
+      `${spec.name}: the ${platform.configLabel} points at the ${platform.secretCacheLabel}`,
+    );
+  }
+  // The sentinel is not the value, and caching it would overwrite the real
+  // one: it sends the cascade on to the keystore, where the value is.
+  const fromConfig = credentialIn(configured);
   if (fromConfig !== null) {
     onStep(`${spec.name}: found in the ${platform.configLabel}`);
     if (cache) {

@@ -1,0 +1,8 @@
+{
+  "name": "manga-tracker-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@prisma/adapter-libsql": "7.8.0"
+  }
+}

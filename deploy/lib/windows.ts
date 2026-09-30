@@ -15,7 +15,9 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
-import { type EnvLine, parseEnvFile, serializeEnvFile } from "./env";
+// From env-file, never env: this module ships inside service.js and launch.js,
+// and env.ts carries the operator manifest, which must not.
+import { type EnvLine, parseEnvFile, serializeEnvFile } from "./env-file";
 import type { Runner } from "./run";
 
 export const TASK_NAME = "MangaTracker";

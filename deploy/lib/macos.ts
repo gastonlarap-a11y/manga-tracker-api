@@ -39,29 +39,47 @@ export async function readKeychain(
 }
 
 /**
- * `-U` updates in place instead of stacking duplicate items.
+ * `security -i` reads its commands from stdin, one per line, and that line has
+ * a length limit (4096 bytes in Apple's source). Refused rather than cut: a
+ * truncated command stores a truncated credential.
+ */
+const SECURITY_LINE_LIMIT = 4000;
+
+/**
+ * Stores the credential in the login keychain without it ever reaching argv.
  *
- * The value goes through argv because `security` has no file or stdin form, so
- * it is briefly visible to `ps`. That is not the weak link here: the plist
- * stores the same string in plaintext on disk permanently.
+ * `add-generic-password -w <value>` put it on the command line, readable by
+ * every process on the machine through `ps` while it ran — which used to be
+ * excusable because the plist held the same string in plaintext anyway, and
+ * stopped being so once the launcher and the sentinel took it out of there.
+ * `-w` with no value prompts on the terminal, which a service control run by
+ * the desktop app does not have.
+ *
+ * So the command goes to `security -i` on stdin, and the value as `-X`, hex:
+ * the stored bytes are the decoded ones, and hex has nothing the interactive
+ * tokenizer could misread. `-v` must never be added — it echoes each command,
+ * value included, to stderr. `-U` updates an existing item in place.
+ *
+ * Interactive mode reports a failing command on stderr and carries on to exit
+ * 0, so the exit status proves nothing: the value is read back instead.
  */
 export async function writeKeychain(
   run: Runner,
   value: string,
   service = KEYCHAIN_SERVICE,
 ): Promise<boolean> {
-  const result = await run([
-    "security",
-    "add-generic-password",
-    "-U",
-    "-s",
-    service,
-    "-a",
-    service,
-    "-w",
-    value,
-  ]);
-  return result.ok;
+  const hex = Buffer.from(value, "utf8").toString("hex");
+  const line = `add-generic-password -U -s ${service} -a ${service} -X ${hex}\n`;
+  if (line.length > SECURITY_LINE_LIMIT) {
+    throw new Error(
+      "the connection string is too long to store in the Keychain through the security tool",
+    );
+  }
+  const result = await run(["security", "-i"], { stdin: line });
+  if (!result.ok) {
+    return false;
+  }
+  return (await readKeychain(run, service)) === value;
 }
 
 // ---------------------------------------------------------------------------

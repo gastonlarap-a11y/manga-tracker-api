@@ -84,14 +84,17 @@ jobs:
           echo "PKG=$PKG" >> "$GITHUB_ENV"
           echo "package size: $(du -sh "$PKG" | cut -f1)"
 
+      # The Azure resource names, and what the operator manifest (deploy/lib/env.ts)
+      # holds: it rode into service.js and launch.js through an import of the
+      # .env parser until that moved to deploy/lib/env-file.ts.
       - name: Verify no personal infrastructure leaked into the package
         run: |
           set -euo pipefail
-          if grep -rIl "kv-mangatracker\|rg-proyectos-personales" "$PKG" 2>/dev/null; then
-            echo "::error::Azure resource names leaked into the package"
+          if grep -rIlE "kv-mangatracker|rg-proyectos-personales|mangatracker-mongodb-url|mangatracker_dev" "$PKG" 2>/dev/null; then
+            echo "::error::personal infrastructure or operator configuration leaked into the package"
             exit 1
           fi
-          echo "clean: no personal Azure resource names in the package"
+          echo "clean: nothing personal in the package"
 
       - name: Start the server from the package
         run: |

@@ -21,6 +21,7 @@ import {
 } from "./lib/env";
 import { platform } from "./lib/platform";
 import { spawnRunner } from "./lib/run";
+import { credentialIn, KEYSTORE_SENTINEL } from "./lib/sync-secret";
 import { heading, installErrorHandler, step, warn } from "./lib/ui";
 
 installErrorHandler();
@@ -42,10 +43,20 @@ for (const spec of ENV_MANIFEST) {
   if (spec.kind !== "secret") {
     continue;
   }
-  const fromConfig = await platform.readConfigEnv(run, spec.name);
+  const configured = await platform.readConfigEnv(run, spec.name);
+  // The sentinel is a pointer, not a value: comparing its hash to the
+  // keystore's always "disagreed", and the advice printed for that —
+  // env:push — would have uploaded the word "keystore" over the credential.
+  const fromConfig = credentialIn(configured);
   const fromCache = await platform.readSecret(run);
+  const configCell =
+    configured === KEYSTORE_SENTINEL
+      ? `→ the ${platform.secretCacheLabel}`
+      : fromConfig === null
+        ? "—"
+        : digest(fromConfig);
   const lines: string[] = [
-    `${platform.configLabel.padEnd(10)}${fromConfig === null ? "—" : digest(fromConfig)}`,
+    `${platform.configLabel.padEnd(10)}${configCell}`,
     `${platform.secretCacheLabel.padEnd(10)}${fromCache === null ? "—" : digest(fromCache)}`,
   ];
   if (fromConfig !== null && fromCache !== null && fromConfig !== fromCache) {

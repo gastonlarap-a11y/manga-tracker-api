@@ -24,6 +24,7 @@ import {
 import { platform } from "./lib/platform";
 import { spawnRunner } from "./lib/run";
 import { resolveSecret } from "./lib/secrets";
+import { KEYSTORE_SENTINEL } from "./lib/sync-secret";
 import { done, fail, heading, installErrorHandler, step, warn } from "./lib/ui";
 
 installErrorHandler();
@@ -69,6 +70,17 @@ for (const spec of ENV_MANIFEST) {
 
 if (profile === "prod") {
   for (const spec of ENV_MANIFEST) {
+    // A configuration that points at the keystore keeps pointing there. The
+    // value was resolved above only so the keystore holds it; writing it here
+    // would put the credential back into the plist in plaintext, which is
+    // exactly what the launcher and the sentinel exist to end.
+    if (
+      spec.kind === "secret" &&
+      (await platform.readConfigEnv(run, spec.name)) === KEYSTORE_SENTINEL
+    ) {
+      step(`${spec.name} stays in the ${platform.secretCacheLabel}`);
+      continue;
+    }
     const value = resolveSpec(spec, profile, home, secrets);
     if (value === null) {
       continue;
