@@ -121,8 +121,14 @@ the user owns, off unless configured.
   a 0600 temp file, never `--value`, which `ps` would expose. The Keychain gets them on stdin:
   `security -i` with `add-generic-password -X <hex>` (the `Runner`'s `stdin` option), read back
   to confirm because interactive mode exits 0 over a failed command; never `-v`, which echoes
-  the value. Still on argv: `plutil -replace -string` in `pin-config-secret`/`repair`, the
-  degraded path that writes the credential into the plist anyway.
+  the value. The plist likewise: `writePlistEnv` reads it out as JSON, sets the key in memory
+  and writes it back through `plutil -convert xml1 -o <path> -` on stdin — `plutil -replace
+  -string <value>` put the value (the password, on the fallback path) on argv. No secret
+  reaches a command line anywhere in `deploy/` now; keep it that way.
+- **`frame-ancestors` is Report-Only** (`src/modules/embedding/`): the allowlist of the desktop
+  app's origins plus a `'none'` control, both reporting to `/api/csp-report` and logged as
+  `[csp] …`. Enforce the allowlist only once a real app on each platform has produced control
+  reports and no allowlist report — guessed wrong, it blanks the dashboard inside the app.
 - **`"keystore"` in the configuration is a pointer, not a value.** Every reader outside the
   launcher goes through `credentialIn` (`deploy/lib/sync-secret.ts`); read as the credential,
   `env:pull --prod` cached the word over the Keychain and `env:push` uploaded it to Key Vault.

@@ -166,6 +166,31 @@ describe("readConfigEnv / writeConfigEnv", () => {
     }
   });
 
+  it("locks a new file to the account before writing anything into it", async () => {
+    // Written first and locked after, it sat readable by every account for
+    // the moment in between — with a credential in it on the fallback path.
+    const dir = await mkdtemp(join(tmpdir(), "mangatracker-windows-test-"));
+    const path = join(dir, "prod.env");
+    try {
+      const contentAtFirstLock: string[] = [];
+      const run: Runner = async (command) => {
+        if (command[0] === "icacls" && contentAtFirstLock.length === 0) {
+          contentAtFirstLock.push(await Bun.file(path).text());
+        }
+        return { ok: true, code: 0, stdout: "", stderr: "" };
+      };
+
+      await writeConfigEnv(run, "MONGODB_URL", "mongodb://u:secret@h/", path);
+
+      expect(contentAtFirstLock).toEqual([""]);
+      expect(await readConfigEnv(run, "MONGODB_URL", path)).toBe(
+        "mongodb://u:secret@h/",
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("replaces an existing entry in place instead of duplicating it", async () => {
     const dir = await mkdtemp(join(tmpdir(), "mangatracker-windows-test-"));
     const path = join(dir, "prod.env");

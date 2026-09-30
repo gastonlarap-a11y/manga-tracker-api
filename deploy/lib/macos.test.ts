@@ -2,8 +2,14 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reloadService, writeKeychain, writePlist } from "./macos";
-import { createFakeRunner, type FakeResponse } from "./run";
+import {
+  readPlistEnv,
+  reloadService,
+  writeKeychain,
+  writePlist,
+  writePlistEnv,
+} from "./macos";
+import { createFakeRunner, type FakeResponse, spawnRunner } from "./run";
 
 describe("writeKeychain", () => {
   const credential =
@@ -216,6 +222,58 @@ describe("writePlist", () => {
       await writePlist(options(dir));
 
       expect((await stat(join(dir, "logs"))).isDirectory()).toBe(true);
+    });
+  });
+
+  it("writes an environment value through stdin, never argv", async () => {
+    // `plutil -replace … -string <value>` put the value on the command line,
+    // and on the fallback path that value is the cluster password.
+    await inTempDir(async (dir) => {
+      const path = join(dir, "com.mangatracker.plist");
+      await Bun.write(path, "placeholder");
+      const credential = "mongodb://dbreader93:tr0ub4dor@host/?tls=true";
+      const fake = createFakeRunner([
+        {
+          when: ["plutil", "-convert", "json"],
+          stdout: JSON.stringify({
+            Label: "com.mangatracker",
+            RunAtLoad: true,
+            EnvironmentVariables: { PORT: "5150" },
+          }),
+        },
+        { when: ["plutil", "-convert", "xml1"] },
+      ]);
+
+      expect(
+        await writePlistEnv(fake.run, "MONGODB_URL", credential, path),
+      ).toBe(true);
+
+      for (const call of fake.calls) {
+        expect(call.join(" ")).not.toContain("tr0ub4dor");
+      }
+      const written = JSON.parse(fake.stdins[1] ?? "{}");
+      expect(written.EnvironmentVariables).toEqual({
+        PORT: "5150",
+        MONGODB_URL: credential,
+      });
+      // Everything else in the plist survives the round trip.
+      expect(written.RunAtLoad).toBe(true);
+    });
+  });
+
+  onMac("round-trips a value through the real plutil", async () => {
+    // The fake above proves what is sent; this proves plutil takes it —
+    // including characters a shell or a URL would treat specially.
+    await inTempDir(async (dir) => {
+      const path = join(dir, "com.mangatracker.plist");
+      await writePlist(options(dir));
+      const value = 'mongodb://u:p%40ss w"o@h/?x=1&y=2';
+
+      expect(await writePlistEnv(spawnRunner, "MONGODB_URL", value, path)).toBe(
+        true,
+      );
+      expect(await readPlistEnv(spawnRunner, "MONGODB_URL", path)).toBe(value);
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
     });
   });
 
