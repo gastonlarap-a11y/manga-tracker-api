@@ -35,6 +35,28 @@
  */
 export const KEYSTORE_SENTINEL = "keystore";
 
+/**
+ * The credential a configuration value actually holds: null for none, and for
+ * the sentinel, which is a pointer to the keystore rather than a credential.
+ *
+ * Every reader of the configuration outside the launcher has to go through
+ * this. The operator tooling predates the sentinel and read the word as the
+ * value: `env:pull --prod` cached "keystore" over the real credential in the
+ * Keychain, `env:push --prod` uploaded it to Key Vault, and `env:show` reported
+ * the two as disagreeing and advised running exactly the command that would
+ * have destroyed the secret.
+ */
+export function credentialIn(configured: string | null): string | null {
+  if (
+    configured === null ||
+    configured === "" ||
+    configured === KEYSTORE_SENTINEL
+  ) {
+    return null;
+  }
+  return configured;
+}
+
 /** Where the value the launcher is about to use came from. */
 export type SyncSecretSource = "config" | "keystore" | "none";
 

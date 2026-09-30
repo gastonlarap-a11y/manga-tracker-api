@@ -1,5 +1,25 @@
 import { describe, expect, it } from "bun:test";
-import { KEYSTORE_SENTINEL, resolveSyncSecret } from "./sync-secret";
+import {
+  credentialIn,
+  KEYSTORE_SENTINEL,
+  resolveSyncSecret,
+} from "./sync-secret";
+
+describe("credentialIn", () => {
+  it.each([
+    [null],
+    [""],
+    // A pointer to the keystore, never a credential: read as one, the
+    // operator tooling cached and uploaded the word over the real value.
+    [KEYSTORE_SENTINEL],
+  ])("holds no credential for %p", (configured) => {
+    expect(credentialIn(configured)).toBeNull();
+  });
+
+  it("returns a connection string written in the configuration", () => {
+    expect(credentialIn("mongodb://host/db")).toBe("mongodb://host/db");
+  });
+});
 
 /**
  * A keystore that answers a fixed sequence, and counts how often it was asked.

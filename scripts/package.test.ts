@@ -1,6 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import { resolve } from "node:path";
-import { assertSafeOutDir, runtimeManifest } from "./package";
+import { join, resolve } from "node:path";
+import {
+  assertRuntimeMatchesRepo,
+  assertSafeOutDir,
+  lockedVersion,
+  NATIVE_DRIVER_PACKAGES,
+  runtimeDir,
+} from "./package";
+
+const repoRoot = resolve(import.meta.dir, "..");
 
 /**
  * Resolved rather than written as a POSIX literal: on Windows a bare
@@ -34,26 +42,62 @@ describe("assertSafeOutDir", () => {
   });
 });
 
-describe("runtimeManifest", () => {
-  it("declares only the native driver", () => {
+describe("the committed runtime", () => {
+  const manifest = async () =>
+    await Bun.file(join(runtimeDir, "package.json")).json();
+
+  it("declares only the native driver", async () => {
     // Everything else is bundled. Listing more would reinstate the 360 MB tree
     // the bundle exists to avoid.
-    const manifest = JSON.parse(runtimeManifest("^7.8.0"));
-
-    expect(Object.keys(manifest.dependencies)).toEqual([
+    expect(Object.keys((await manifest()).dependencies)).toEqual([
       "@prisma/adapter-libsql",
     ]);
   });
 
-  it("carries the version it was given rather than one written by hand", () => {
-    // A hardcoded version drifts the day the dependency is bumped, and the
-    // failure surfaces as a native module mismatch at run time.
-    expect(JSON.parse(runtimeManifest("^9.1.2")).dependencies).toEqual({
-      "@prisma/adapter-libsql": "^9.1.2",
-    });
+  it("pins it exactly, so a rebuild resolves the same tree", async () => {
+    expect((await manifest()).dependencies["@prisma/adapter-libsql"]).toMatch(
+      /^\d+\.\d+\.\d+$/,
+    );
   });
 
-  it("is an ES module, like the code it has to load", () => {
-    expect(JSON.parse(runtimeManifest("^7.8.0")).type).toBe("module");
+  it("is an ES module, like the code it has to load", async () => {
+    expect((await manifest()).type).toBe("module");
+  });
+
+  it("resolves the driver exactly as this repository does", async () => {
+    // The drift this guards against: bumping the adapter here and forgetting
+    // runtime/, which would ship a driver the tests never ran against.
+    const [repoLock, runtimeLock] = await Promise.all([
+      Bun.file(join(repoRoot, "bun.lock")).text(),
+      Bun.file(join(runtimeDir, "bun.lock")).text(),
+    ]);
+
+    expect(() => assertRuntimeMatchesRepo(repoLock, runtimeLock)).not.toThrow();
+  });
+
+  it("records the native package of both platforms a release targets", async () => {
+    const runtimeLock = await Bun.file(join(runtimeDir, "bun.lock")).text();
+
+    expect(lockedVersion(runtimeLock, "@libsql/darwin-arm64")).not.toBeNull();
+    expect(lockedVersion(runtimeLock, "@libsql/win32-x64-msvc")).not.toBeNull();
+  });
+});
+
+describe("assertRuntimeMatchesRepo", () => {
+  const lock = (version: string) =>
+    NATIVE_DRIVER_PACKAGES.map(
+      (name) => `    "${name}": ["${name}@${version}", "", {}, "sha512-x"],`,
+    ).join("\n");
+
+  it("refuses a runtime lock that has drifted", () => {
+    expect(() =>
+      assertRuntimeMatchesRepo(lock("7.9.0"), lock("7.8.0")),
+    ).toThrow(/runtime\/bun.lock/);
+  });
+
+  it("accepts one that matches", () => {
+    expect(() =>
+      assertRuntimeMatchesRepo(lock("7.8.0"), lock("7.8.0")),
+    ).not.toThrow();
   });
 });

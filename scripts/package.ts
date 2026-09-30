@@ -61,18 +61,56 @@ export function assertSafeOutDir(out: string, root = repoRoot): void {
   }
 }
 
-/** Only the native driver: bun resolves its own dependency tree from here. */
-export function runtimeManifest(adapterVersion: string): string {
-  return `${JSON.stringify(
-    {
-      name: "manga-tracker-runtime",
-      private: true,
-      type: "module",
-      dependencies: { "@prisma/adapter-libsql": adapterVersion },
-    },
-    null,
-    2,
-  )}\n`;
+/**
+ * The committed manifest and lockfile the shipped tree installs its native
+ * driver from.
+ *
+ * Committed rather than written at build time: a manifest generated here with
+ * the repository's caret range, installed with `--no-save`, resolved
+ * `@prisma/adapter-libsql` and every `@libsql/*` package afresh on each build —
+ * so rebuilding a tag did not produce the same app, which is the promise
+ * `sources.json` in the desktop repository makes. The lockfile records the
+ * native packages of every platform, and bun installs only the one it runs on.
+ */
+export const runtimeDir = join(repoRoot, "runtime");
+
+/**
+ * The packages the runtime must resolve exactly as the repository does, since
+ * the server is bundled against the repository's copy of the client and only
+ * the driver is installed at the destination.
+ */
+export const NATIVE_DRIVER_PACKAGES = [
+  "@prisma/adapter-libsql",
+  "@prisma/driver-adapter-utils",
+  "@libsql/client",
+] as const;
+
+/** The version a `bun.lock` resolved for a package, or null when it has none. */
+export function lockedVersion(lock: string, name: string): string | null {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+  const match = new RegExp(`"${escaped}": \\["${escaped}@([^"]+)"`).exec(lock);
+  return match?.[1] ?? null;
+}
+
+/**
+ * Refuses a runtime lockfile that has drifted from the repository's: the day
+ * the adapter is bumped here and `runtime/` is forgotten, the tree would ship a
+ * driver the tests never ran against.
+ */
+export function assertRuntimeMatchesRepo(
+  repoLock: string,
+  runtimeLock: string,
+): void {
+  for (const name of NATIVE_DRIVER_PACKAGES) {
+    const repo = lockedVersion(repoLock, name);
+    const runtime = lockedVersion(runtimeLock, name);
+    if (repo === null || repo !== runtime) {
+      throw new Error(
+        `runtime/bun.lock resolves ${name} to ${runtime ?? "nothing"} while bun.lock has ${repo ?? "nothing"}. ` +
+          "Set the same version in runtime/package.json, then `bun install --lockfile-only` in runtime/.",
+      );
+    }
+  }
 }
 
 async function run(command: string[], cwd = repoRoot): Promise<void> {
@@ -139,20 +177,18 @@ export async function buildPackage(options: {
     recursive: true,
   });
 
-  // Read from this repo's package.json rather than repeated by hand: a
-  // hardcoded version drifts the day the dependency is bumped, and the failure
-  // shows up as a native module mismatch at run time.
-  const { dependencies } = await Bun.file(
-    join(repoRoot, "package.json"),
-  ).json();
-  const adapterVersion = dependencies?.["@prisma/adapter-libsql"];
-  if (typeof adapterVersion !== "string") {
-    throw new Error(
-      "@prisma/adapter-libsql is not a dependency of this repository",
-    );
-  }
-  await Bun.write(join(out, "package.json"), runtimeManifest(adapterVersion));
-  await run(["bun", "install", "--production", "--no-save"], out);
+  // The native driver, from the committed runtime lockfile, checked against
+  // the repository's first: see runtimeDir.
+  const [repoLock, runtimeLock] = await Promise.all([
+    Bun.file(join(repoRoot, "bun.lock")).text(),
+    Bun.file(join(runtimeDir, "bun.lock")).text(),
+  ]);
+  assertRuntimeMatchesRepo(repoLock, runtimeLock);
+  await cp(join(runtimeDir, "package.json"), join(out, "package.json"));
+  await cp(join(runtimeDir, "bun.lock"), join(out, "bun.lock"));
+  // --production implies a frozen lockfile: a lock that does not match its
+  // manifest fails the build instead of being rewritten.
+  await run(["bun", "install", "--production", "--frozen-lockfile"], out);
 
   // The dashboard: without it the server answers 404 on `/`, which is the
   // page the desktop app's window loads. Optional because the smoke test can

@@ -2,8 +2,57 @@ import { describe, expect, it } from "bun:test";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { reloadService, writePlist } from "./macos";
+import { reloadService, writeKeychain, writePlist } from "./macos";
 import { createFakeRunner, type FakeResponse } from "./run";
+
+describe("writeKeychain", () => {
+  const credential =
+    "mongodb://dbreader93:tr0ub4dor@host.example.com/?tls=true";
+
+  it("never puts the credential on the command line", async () => {
+    // A command line is readable by every process on the machine through
+    // `ps`. The credential goes to `security -i` on stdin, as hex.
+    const fake = createFakeRunner([
+      { when: ["security", "-i"] },
+      { when: ["security", "find-generic-password"], stdout: credential },
+    ]);
+
+    expect(await writeKeychain(fake.run, credential, "test-service")).toBe(
+      true,
+    );
+
+    for (const call of fake.calls) {
+      expect(call.join(" ")).not.toContain("tr0ub4dor");
+    }
+    const hex = Buffer.from(credential, "utf8").toString("hex");
+    expect(fake.stdins[0]).toBe(
+      `add-generic-password -U -s test-service -a test-service -X ${hex}\n`,
+    );
+  });
+
+  it("trusts the value read back, not the exit status", async () => {
+    // Interactive mode reports a failed command on stderr and still exits 0.
+    const fake = createFakeRunner([
+      {
+        when: ["security", "-i"],
+        stderr: "add-generic-password: returned -25308",
+      },
+      { when: ["security", "find-generic-password"], stdout: "an older value" },
+    ]);
+
+    expect(await writeKeychain(fake.run, credential, "test-service")).toBe(
+      false,
+    );
+  });
+
+  it("refuses a value too long for one interactive command", async () => {
+    const fake = createFakeRunner([]);
+
+    await expect(
+      writeKeychain(fake.run, `mongodb://${"a".repeat(2100)}`, "test-service"),
+    ).rejects.toThrow(/too long/);
+  });
+});
 
 /**
  * Timings collapsed so the tests do not actually sleep, and a fixed uid so the

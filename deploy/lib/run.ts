@@ -12,15 +12,34 @@ export interface CommandResult {
   readonly stderr: string;
 }
 
-export type Runner = (command: readonly string[]) => Promise<CommandResult>;
+export interface RunOptions {
+  /**
+   * Handed to the process on stdin. The channel for a secret: an argument is
+   * readable by every process on the machine through `ps` for as long as the
+   * command runs, and a pipe is not.
+   */
+  readonly stdin?: string;
+}
+
+export type Runner = (
+  command: readonly string[],
+  options?: RunOptions,
+) => Promise<CommandResult>;
 
 /** Runs the command for real. stdout/stderr are captured, never inherited. */
-export const spawnRunner: Runner = async (command) => {
+export const spawnRunner: Runner = async (command, options) => {
   const [bin, ...rest] = command;
   if (bin === undefined) {
     throw new Error("spawnRunner called with an empty command");
   }
-  const proc = Bun.spawn([bin, ...rest], { stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn([bin, ...rest], {
+    stdin:
+      options?.stdin === undefined
+        ? "ignore"
+        : new TextEncoder().encode(options.stdin),
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const [stdout, stderr] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
@@ -62,6 +81,8 @@ export interface FakeRunner {
   readonly run: Runner;
   /** Every command received, in order. */
   readonly calls: readonly (readonly string[])[];
+  /** What each of those was handed on stdin, by the same index. */
+  readonly stdins: readonly (string | undefined)[];
 }
 
 const startsWith = (command: readonly string[], prefix: readonly string[]) =>
@@ -76,10 +97,13 @@ export function createFakeRunner(
   responses: readonly FakeResponse[],
 ): FakeRunner {
   const calls: (readonly string[])[] = [];
+  const stdins: (string | undefined)[] = [];
   return {
     calls,
-    run: async (command) => {
+    stdins,
+    run: async (command, options) => {
       calls.push(command);
+      stdins.push(options?.stdin);
       const match = responses.find((response) =>
         startsWith(command, response.when),
       );

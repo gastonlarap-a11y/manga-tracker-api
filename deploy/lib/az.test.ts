@@ -24,7 +24,7 @@ const SCOPE = `/subscriptions/s/resourcegroups/rg/providers/Microsoft.KeyVault/v
 const emptyMachine = [
   { when: ["plutil", "-extract"], code: 1 },
   { when: ["security", "find-generic-password"], code: 1 },
-  { when: ["security", "add-generic-password"] },
+  { when: ["security", "-i"] },
   { when: ["which", "az"] },
 ] as const;
 
@@ -148,7 +148,9 @@ describe("resolveSecret", () => {
   it("prefers the plist and never reaches the network", async () => {
     const fake = createFakeRunner([
       { when: ["plutil", "-extract"], stdout: "from-plist" },
-      { when: ["security", "add-generic-password"] },
+      // Caching it: the command on stdin, then read back to confirm.
+      { when: ["security", "-i"] },
+      { when: ["security", "find-generic-password"], stdout: "from-plist" },
     ]);
     const resolved = await resolveSecret(fake.run, SPEC, {
       vault: VAULT,
@@ -184,12 +186,13 @@ describe("resolveSecret", () => {
     });
 
     expect(resolved).toEqual({ value: "from-vault", from: "keyvault" });
-    // Caching is what makes the next run work offline.
-    expect(
-      fake.calls.some(
-        (call) => call[0] === "security" && call[1] === "add-generic-password",
-      ),
-    ).toBe(true);
+    // Caching is what makes the next run work offline — through `security -i`
+    // on stdin, so the value never shows up in the command line.
+    const cachedAt = fake.calls.findIndex(
+      (call) => call[0] === "security" && call[1] === "-i",
+    );
+    expect(cachedAt).toBeGreaterThanOrEqual(0);
+    expect(fake.stdins[cachedAt]).toContain("add-generic-password");
   });
 
   it("gives up cleanly when the Azure CLI is missing", async () => {

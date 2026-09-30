@@ -12,6 +12,7 @@
 // values the server falls back to, and two copies of a 32-character literal
 // drift exactly once — the day the extension goes silent for no visible reason.
 import { DEFAULT_EXTENSION_IDS } from "../../src/lib/cors";
+import type { EnvLine } from "./env-file";
 
 export type Profile = "dev" | "prod";
 
@@ -108,81 +109,17 @@ export function resolveSpec(
 }
 
 // ---------------------------------------------------------------------------
-// .env parsing and serialization
+// .env files: the format lives in ./env-file, which the shipped bundles use
+// without this manifest. Re-exported so the operator scripts keep one import.
 // ---------------------------------------------------------------------------
 
-/**
- * A `.env` is kept as lines rather than a map so rewriting it preserves the
- * comments, the ordering and — most importantly — any variable this manifest
- * does not know about. A pull must never silently drop something you added by
- * hand.
- */
-export type EnvLine =
-  | { readonly kind: "raw"; readonly text: string }
-  | { readonly kind: "entry"; readonly key: string; readonly value: string };
-
-const ENTRY = /^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$/;
-
-/**
- * Undoes the quoting rules Bun applies when it loads a `.env`. Verified
- * against Bun directly: `$` expands even inside single quotes, an unquoted `#`
- * starts a comment, and `\$` is the only escape that survives.
- */
-function parseValue(rawValue: string): string {
-  const trimmed = rawValue.trim();
-  const quote = trimmed[0];
-  if ((quote === '"' || quote === "'") && trimmed.at(-1) === quote) {
-    return trimmed.slice(1, -1).replaceAll("\\$", "$");
-  }
-  const uncommented = trimmed.split("#")[0] ?? "";
-  return uncommented.trim().replaceAll("\\$", "$");
-}
-
-export function parseEnvFile(text: string): EnvLine[] {
-  // No file yet is no lines, not one empty line: otherwise a freshly created
-  // .env opens with stray blanks before the first comment.
-  if (text === "") {
-    return [];
-  }
-  return text
-    .split("\n")
-    .slice(0, text.endsWith("\n") ? -1 : undefined)
-    .map((line): EnvLine => {
-      const match = ENTRY.exec(line);
-      const value = match?.[2];
-      return match?.[1] === undefined || value === undefined
-        ? { kind: "raw", text: line }
-        : { kind: "entry", key: match[1], value: parseValue(value) };
-    });
-}
-
-/**
- * Bun expands `$` in every quoting style, so the only safe form is double
- * quotes with `$` escaped. It does NOT unescape `\"` or `\\` — those come back
- * with the backslash still attached — so a value containing either cannot be
- * round-tripped and we refuse to write it. Corrupting a credential silently is
- * far worse than stopping. A Mongo URI percent-encodes both anyway.
- */
-export function serializeValue(key: string, value: string): string {
-  if (value.includes('"') || value.includes("\\")) {
-    throw new Error(
-      `${key} contains a quote or backslash, which Bun cannot read back from a .env file. ` +
-        "Percent-encode it in the connection string.",
-    );
-  }
-  return `"${value.replaceAll("$", "\\$")}"`;
-}
-
-export function serializeEnvFile(lines: readonly EnvLine[]): string {
-  const body = lines
-    .map((line) =>
-      line.kind === "raw"
-        ? line.text
-        : `${line.key}=${serializeValue(line.key, line.value)}`,
-    )
-    .join("\n");
-  return body === "" ? "" : `${body}\n`;
-}
+export {
+  type EnvLine,
+  envValues,
+  parseEnvFile,
+  serializeEnvFile,
+  serializeValue,
+} from "./env-file";
 
 /** Replaces the entry in place, keeping its position, or appends it with its comment. */
 export function upsertEntry(
@@ -204,16 +141,4 @@ export function upsertEntry(
     { kind: "raw", text: `# ${spec.comment}` },
     { kind: "entry", key: spec.name, value },
   ];
-}
-
-export function envValues(
-  lines: readonly EnvLine[],
-): ReadonlyMap<string, string> {
-  return new Map(
-    lines
-      .filter(
-        (line): line is EnvLine & { kind: "entry" } => line.kind === "entry",
-      )
-      .map((line) => [line.key, line.value]),
-  );
 }

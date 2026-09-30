@@ -15,6 +15,7 @@ import { envValues, parseEnvFile, secretSpecs } from "./lib/env";
 import { platform } from "./lib/platform";
 import { spawnRunner } from "./lib/run";
 import { pushSecret } from "./lib/secrets";
+import { credentialIn } from "./lib/sync-secret";
 import { done, fail, heading, installErrorHandler, step, warn } from "./lib/ui";
 
 installErrorHandler();
@@ -48,7 +49,9 @@ if (!(await canListSecrets(run, vaultName))) {
 /** Where a secret's current value lives on this machine. */
 async function localValue(name: string): Promise<string | null> {
   if (profile === "prod") {
-    return await platform.readConfigEnv(run, name);
+    // The sentinel says the value is in the keystore; pushed as is, the word
+    // "keystore" would replace the credential in Key Vault and then here.
+    return credentialIn(await platform.readConfigEnv(run, name));
   }
   const envFile = Bun.file(".env");
   if (await envFile.exists()) {
