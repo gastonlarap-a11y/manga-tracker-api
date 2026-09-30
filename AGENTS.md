@@ -120,6 +120,14 @@ dashboard. Single instance by design: no cloud dependencies, no background scrap
   `UNPACKED_EXTENSION_ID`. The manifest declares a default that `src/config.ts` also falls back
   to, and a second copy of that value drifts exactly once: the day the extension goes silent for
   no visible reason. Anything with a side effect stays on its own side of the line.
+- **CORS is not the guard; `src/lib/local-guard.ts` is.** CORS decides what a page may *read*, and
+  a simple cross-origin request is sent without asking: `POST /api/sync/restore?force=true` has
+  no body, so any open page could fire it at 127.0.0.1. `hono/csrf` refuses an unsafe,
+  form-typed request (no Content-Type counts as one) unless Origin is on the CORS allowlist or
+  Sec-Fetch-Site is same-origin, and a Host check refuses any hostname but loopback, which is
+  the only thing that stops DNS rebinding. Consequence for hand-run requests: a `curl -X POST`
+  without a JSON body needs `-H 'Origin: http://127.0.0.1:<port>'`. `onError` keeps the status
+  of an `HTTPException`; folding the guard's 403 into a 500 would report a refusal as a crash.
 - The port and the allowed extension ids are configuration, never literals. `PORT` is chosen by
   whoever installs (the CORS allowlist follows it, and `deploy/` reads it from the manifest);
   `EXTENSION_IDS` holds several ids at once because the Web Store assigns one on publication and
