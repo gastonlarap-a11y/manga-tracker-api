@@ -5,6 +5,8 @@ import { cors } from "hono/cors";
 import { config } from "./config";
 import { applyMigrations } from "./db/migrate";
 import { allowedOrigins } from "./lib/cors";
+import { errorHandler } from "./lib/http";
+import { localRequestGuards } from "./lib/local-guard";
 import { adaptersRoutes } from "./modules/adapters/adapters.routes";
 import { duplicatesRoutes } from "./modules/duplicates/duplicates.routes";
 import { eventsRoutes } from "./modules/events/events.routes";
@@ -26,24 +28,18 @@ if (migration.applied.length > 0) {
 
 const app = new OpenAPIHono();
 
+const origins = { port: config.port, extensionIds: config.extensionIds };
+
+// Before CORS, because CORS only governs what a page may read: a request a
+// page fires without needing the answer has to be refused here. See
+// src/lib/local-guard.ts.
+app.use("*", ...localRequestGuards(origins));
+
 // Loopback on the port this process actually listens on, plus every configured
 // extension id — see src/lib/cors.ts for why neither can be a literal.
-app.use(
-  "*",
-  cors({
-    origin: [
-      ...allowedOrigins({
-        port: config.port,
-        extensionIds: config.extensionIds,
-      }),
-    ],
-  }),
-);
+app.use("*", cors({ origin: [...allowedOrigins(origins)] }));
 
-app.onError((err, c) => {
-  console.error(`[Unhandled Error] ${err.message}`, err.stack);
-  return c.json({ error: "Internal Server Error" }, 500);
-});
+app.onError(errorHandler);
 
 app.route("/", healthRoutes);
 app.route("/api", eventsRoutes);
