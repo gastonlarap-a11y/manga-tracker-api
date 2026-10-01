@@ -156,6 +156,22 @@ jobs:
             *) echo "::error::the reading was not persisted"; exit 1 ;;
           esac
 
+          # What the dashboard actually reads: the projection the migrations'
+          # triggers keep, paged and totalled. Empty here would mean the
+          # triggers never fired in the packaged database.
+          page=$(curl -fsS 'http://127.0.0.1:5199/api/library/page?limit=5')
+          echo "GET /api/library/page -> $page"
+          case "$page" in
+            *"Smoke Test"*) ;;
+            *) echo "::error::the reading is missing from the paged library"; exit 1 ;;
+          esac
+          summary=$(curl -fsS http://127.0.0.1:5199/api/library/summary)
+          echo "GET /api/library/summary -> $summary"
+          case "$summary" in
+            *'"all":1'*) echo "the projection follows what is written" ;;
+            *) echo "::error::the summary does not count the reading"; exit 1 ;;
+          esac
+
       - name: Serve the dashboard, which is what the desktop window loads
         run: |
           set -euo pipefail
