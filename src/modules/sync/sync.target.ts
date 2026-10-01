@@ -7,9 +7,10 @@
 // data the moment a stale machine recorded a chapter. Absence means "not synced
 // yet", never "deleted" — deletion travels as Manga.deletedAt instead.
 //
-// Bun note: mongodb@7 cannot run here — its bson@7 calls `node:v8`
-// isBuildingSnapshot at import time, which Bun does not implement. The 6.x line
-// (bson 6.x) works, so the dependency is pinned to ^6.
+// Bun note: mongodb@7's bson@7 calls `node:v8` isBuildingSnapshot at import
+// time. Bun implemented it in 1.4.0 (oven-sh/bun#32502); on 1.3.x the import
+// throws, which is why the driver sat on ^6 until the runtime moved to 1.4.
+// Bun and mongodb therefore move together: never 7.x on a 1.3 runtime.
 import { Binary, type Collection, type Db, MongoClient } from "mongodb";
 import type { MongoConfig } from "../../config";
 import type {

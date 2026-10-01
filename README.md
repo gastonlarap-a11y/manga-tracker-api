@@ -17,7 +17,8 @@ path, so the tracker behaves identically with no network.
 
 ## Quick start
 
-The only prerequisite is [Bun](https://bun.sh) 1.3+.
+The only prerequisite is [Bun](https://bun.sh) 1.4+ — the MongoDB driver's `bson@7` needs a
+Node API Bun only implements from 1.4.0, so on 1.3 the sync module cannot even be imported.
 
 ```sh
 bun install
