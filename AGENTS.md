@@ -276,7 +276,9 @@ the user owns, off unless configured.
     (0.75) is what `/duplicates` lists. Both live in `lib` because the ingestion needs them and
     modules never import each other.
   - `DuplicateDismissal` is the mandatory counterpart of the lower suggestion threshold: without
-    a way to reject a pair, a false positive returns on every load.
+    a way to reject a pair, a false positive returns on every load. And a dismissal can be taken
+    back (`GET /duplicates/dismissals`, `POST /duplicates/undismiss`): a pair dismissed by mistake
+    used to be hidden for good, with nothing on screen saying it was there.
   - **`/duplicates` never scores every pair.** That was quadratic — hours at 10 000 titles.
     `src/lib/duplicate-candidates.ts` files each title under keys such that two titles that
     could reach a suggestion always share one (word deletion neighbourhoods of depth ⌊L/5⌋,
@@ -322,8 +324,11 @@ the user owns, off unless configured.
     **slug** for the same reason documents are: a local uuid means nothing to a peer. A pointer
     to a slug that has not arrived yet is kept as written and resolves on the next pass — never
     cleared, or the two machines would strip each other's merge forever.
-  - `DuplicateDismissal` is a set union keyed by the ordered slug pair, exactly like
-    `ReadingEvent`: nothing is ever removed for being absent on one side.
+  - `DuplicateDismissal` is keyed by the ordered slug pair and merges last-write-wins on
+    `updatedAt`, like `Manga`. Taking a dismissal back is `revokedAt`, a value that converges —
+    **never a deleted row**: nothing is ever removed for being absent on one side, so a deleted
+    row would come straight back from the replica. A document from before `revokedAt` reads as
+    a dismissal last written when it was created, so any later word on the pair beats it.
   - Documents are keyed by natural keys (`normalizedSlug`, `domain`), not by the local uuid, so
     two machines that discover the same title separately merge instead of colliding on the
     unique slug index.

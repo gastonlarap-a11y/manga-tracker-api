@@ -41,13 +41,19 @@ export interface MangaDoc {
   mergedIntoSlug: string | null;
 }
 
-/** "These two are not the same manga", keyed by the ordered slug pair. */
+/**
+ * "These two are not the same manga", keyed by the ordered slug pair, and
+ * merged last-write-wins on `updatedAt` like a manga: taking a dismissal back
+ * is `revokedAt`, a value that converges, never a document removed.
+ */
 export interface DismissalDoc {
   /** `${slugA}|${slugB}`, both already in lexicographic order. */
   _id: string;
   slugA: string;
   slugB: string;
   createdAt: Date;
+  updatedAt: Date;
+  revokedAt: Date | null;
 }
 
 export interface ReadingEventDoc {
@@ -102,6 +108,8 @@ interface DismissalRow {
   slugA: string;
   slugB: string;
   createdAt: Date;
+  updatedAt: Date;
+  revokedAt: Date | null;
 }
 
 interface ReadingEventRow {
@@ -152,6 +160,8 @@ export function toDismissalDoc(row: DismissalRow): DismissalDoc {
     slugA: row.slugA,
     slugB: row.slugB,
     createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    revokedAt: row.revokedAt,
   };
 }
 
@@ -308,9 +318,18 @@ export interface DismissalMerge {
   slugA: string;
   slugB: string;
   createdAt: Date;
+  updatedAt: Date;
+  revokedAt: Date | null;
 }
 
-/** Null when the document carries no usable pair — it is skipped, not guessed. */
+/**
+ * Null when the document carries no usable pair — it is skipped, not guessed.
+ *
+ * A document written before dismissals could be taken back has neither
+ * `updatedAt` nor `revokedAt`: it was last written when it was created, and it
+ * stands. Read that way, any later word on the pair — from any machine — wins
+ * over it, and it never revokes anything.
+ */
 export function fromDismissalDoc(
   doc: Record<string, unknown>,
 ): DismissalMerge | null {
@@ -319,7 +338,14 @@ export function fromDismissalDoc(
   if (slugA === "" || slugB === "" || slugA === slugB) {
     return null;
   }
-  return { slugA, slugB, createdAt: asDate(doc.createdAt) };
+  const createdAt = asDate(doc.createdAt);
+  return {
+    slugA,
+    slugB,
+    createdAt,
+    updatedAt: doc.updatedAt === undefined ? createdAt : asDate(doc.updatedAt),
+    revokedAt: asNullableDate(doc.revokedAt),
+  };
 }
 
 export interface EventMerge {

@@ -59,9 +59,10 @@ model Manga {
 // ------------------------------------------------------
 // Duplicate Detection: rejected suggestions
 // ------------------------------------------------------
-/// "These two are NOT the same manga" — silences a pair in /duplicates forever.
-/// The mandatory counterpart of lowering the detection threshold: without it a
-/// false positive comes back on every load of the view and the report is noise.
+/// "These two are NOT the same manga" — silences a pair in /duplicates until
+/// the user takes it back. The mandatory counterpart of lowering the detection
+/// threshold: without it a false positive comes back on every load of the view
+/// and the report is noise.
 model DuplicateDismissal {
   id String @id @default(uuid())
 
@@ -71,8 +72,13 @@ model DuplicateDismissal {
   slugB String
 
   createdAt DateTime @default(now())
-  // Same reasoning as Manga.updatedAt: set explicitly, never by @updatedAt.
+  // Same reasoning as Manga.updatedAt: set explicitly, never by @updatedAt. It
+  // decides which machine's word on the pair wins (last write wins).
   updatedAt DateTime @default(now())
+  // A dismissal taken back ("volver a sugerir"). A value rather than a deleted
+  // row for the reason Manga.deletedAt is one: sync never removes anything for
+  // being absent on one side, so a deleted row would be pulled right back.
+  revokedAt DateTime?
 
   @@unique([slugA, slugB])
 }

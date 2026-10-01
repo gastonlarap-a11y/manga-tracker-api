@@ -2,7 +2,11 @@ import { beforeEach, describe, expect, it } from "bun:test";
 import { z } from "@hono/zod-openapi";
 import { prisma } from "../../db/client";
 import { mangaSchema } from "../../lib/schemas";
-import { duplicatePairSchema, duplicatesRoutes } from "./duplicates.routes";
+import {
+  dismissalSchema,
+  duplicatePairSchema,
+  duplicatesRoutes,
+} from "./duplicates.routes";
 
 const duplicatesResponseSchema = z.array(duplicatePairSchema);
 
@@ -214,6 +218,103 @@ describe("POST /duplicates/dismiss", () => {
       idB: "nope",
     });
     expect(res.status).toBe(404);
+  });
+});
+
+describe("dismissals, and taking one back", () => {
+  async function listDismissals() {
+    const res = await duplicatesRoutes.request("/duplicates/dismissals");
+    expect(res.status).toBe(200);
+    return z.array(dismissalSchema).parse(await res.json());
+  }
+
+  async function dismissedDragons() {
+    const a = await prisma.manga.create({ data: DRAGON_A });
+    const b = await prisma.manga.create({ data: DRAGON_B });
+    await postJson("/duplicates/dismiss", { idA: a.id, idB: b.id });
+    return { a, b };
+  }
+
+  it("lists a dismissed pair with both titles", async () => {
+    await dismissedDragons();
+
+    const [dismissal] = await listDismissals();
+
+    expect([dismissal?.a?.canonicalName, dismissal?.b?.canonicalName]).toEqual(
+      [DRAGON_A.canonicalName, DRAGON_B.canonicalName].toSorted((x, y) =>
+        x.localeCompare(y),
+      ),
+    );
+  });
+
+  it("lists a pair by its slug when one title is not on this machine", async () => {
+    // Dismissed on another machine, synced before that title was.
+    await prisma.duplicateDismissal.create({
+      data: { slugA: "aaa-otra", slugB: DRAGON_B.normalizedSlug },
+    });
+    await prisma.manga.create({ data: DRAGON_B });
+
+    const [dismissal] = await listDismissals();
+
+    expect(dismissal?.slugA).toBe("aaa-otra");
+    expect(dismissal?.a).toBeNull();
+    expect(dismissal?.b?.canonicalName).toBe(DRAGON_B.canonicalName);
+  });
+
+  it("suggests the pair again once taken back, and keeps the row", async () => {
+    await dismissedDragons();
+    expect(await listDuplicates()).toEqual([]);
+
+    const res = await postJson("/duplicates/undismiss", {
+      // Either order: the pair is stored sorted.
+      slugA: DRAGON_B.normalizedSlug,
+      slugB: DRAGON_A.normalizedSlug,
+    });
+
+    expect(res.status).toBe(204);
+    expect(await listDuplicates()).toHaveLength(1);
+    expect(await listDismissals()).toEqual([]);
+    // A value, not a deleted row: sync would pull a deleted one right back.
+    const [row] = await prisma.duplicateDismissal.findMany();
+    expect(row?.revokedAt).not.toBeNull();
+  });
+
+  it("dismisses again a pair taken back", async () => {
+    const { a, b } = await dismissedDragons();
+    await postJson("/duplicates/undismiss", {
+      slugA: DRAGON_A.normalizedSlug,
+      slugB: DRAGON_B.normalizedSlug,
+    });
+
+    await postJson("/duplicates/dismiss", { idA: a.id, idB: b.id });
+
+    expect(await listDuplicates()).toEqual([]);
+    expect(await listDismissals()).toHaveLength(1);
+    expect(await prisma.duplicateDismissal.count()).toBe(1);
+  });
+
+  it("takes back the same pair twice without complaint", async () => {
+    await dismissedDragons();
+    const body = {
+      slugA: DRAGON_A.normalizedSlug,
+      slugB: DRAGON_B.normalizedSlug,
+    };
+
+    await postJson("/duplicates/undismiss", body);
+    const second = await postJson("/duplicates/undismiss", body);
+
+    expect(second.status).toBe(204);
+  });
+
+  it("404s on a pair never dismissed, and 400s on a body without slugs", async () => {
+    const missing = await postJson("/duplicates/undismiss", {
+      slugA: "una",
+      slugB: "otra",
+    });
+    const invalid = await postJson("/duplicates/undismiss", { slugA: "una" });
+
+    expect(missing.status).toBe(404);
+    expect(invalid.status).toBe(400);
   });
 });
 

@@ -4,7 +4,9 @@ import { mangaSchema, toMangaDto } from "../../lib/schemas";
 import {
   dismissDuplicatePair,
   findDuplicatePairs,
+  listDismissals,
   mergeMangas,
+  undismissDuplicatePair,
   unmergeManga,
 } from "./duplicates.service";
 
@@ -138,6 +140,58 @@ const dismissRoute = createRoute({
   },
 });
 
+export const dismissalSchema = z
+  .object({
+    // The pair as stored: both slugs, in lexicographic order.
+    slugA: z.string(),
+    slugB: z.string(),
+    dismissedAt: z.string(),
+    // Null when that title is not on this machine (dismissed on another one
+    // and not synced here yet): the pair is listed by its slug instead.
+    a: mangaSchema.nullable(),
+    b: mangaSchema.nullable(),
+  })
+  .openapi("Dismissal");
+
+const getDismissalsRoute = createRoute({
+  method: "get",
+  path: "/duplicates/dismissals",
+  tags: ["duplicates"],
+  responses: {
+    200: {
+      description: "Pairs dismissed as not the same manga, most recent first",
+      content: { "application/json": { schema: z.array(dismissalSchema) } },
+    },
+  },
+});
+
+const undismissBodySchema = z
+  .object({ slugA: z.string().min(1), slugB: z.string().min(1) })
+  .openapi("UndismissDuplicateBody");
+
+const undismissRoute = createRoute({
+  method: "post",
+  path: "/duplicates/undismiss",
+  tags: ["duplicates"],
+  request: {
+    body: {
+      required: true,
+      content: { "application/json": { schema: undismissBodySchema } },
+    },
+  },
+  responses: {
+    204: { description: "The pair is a suggestion again" },
+    400: {
+      description: "Invalid body",
+      content: { "application/json": { schema: errorSchema } },
+    },
+    404: {
+      description: "That pair was never dismissed",
+      content: { "application/json": { schema: errorSchema } },
+    },
+  },
+});
+
 export const duplicatesRoutes = new OpenAPIHono({ defaultHook })
   .openapi(getDuplicatesRoute, async (c) => {
     const pairs = await findDuplicatePairs();
@@ -192,6 +246,27 @@ export const duplicatesRoutes = new OpenAPIHono({ defaultHook })
     const outcome = await dismissDuplicatePair(idA, idB);
     if (outcome.kind === "not-found") {
       return c.json({ error: `Manga ${outcome.id} not found` }, 404);
+    }
+    return c.body(null, 204);
+  })
+  .openapi(getDismissalsRoute, async (c) => {
+    const dismissals = await listDismissals();
+    return c.json(
+      dismissals.map((row) => ({
+        slugA: row.slugA,
+        slugB: row.slugB,
+        dismissedAt: row.dismissedAt.toISOString(),
+        a: row.a === null ? null : toMangaDto(row.a),
+        b: row.b === null ? null : toMangaDto(row.b),
+      })),
+      200,
+    );
+  })
+  .openapi(undismissRoute, async (c) => {
+    const { slugA, slugB } = c.req.valid("json");
+    const outcome = await undismissDuplicatePair(slugA, slugB);
+    if (outcome.kind === "not-found") {
+      return c.json({ error: "That pair was never dismissed" }, 404);
     }
     return c.body(null, 204);
   });
