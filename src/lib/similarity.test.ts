@@ -74,22 +74,21 @@ describe("levenshteinWithin", () => {
 });
 
 describe("titleSimilarityAtLeast", () => {
-  it.each([
-    SUGGEST_SCORE,
-    AUTO_MERGE_SCORE,
-    0.5,
-  ])("answers exactly what titleSimilarity does, at a floor of %d", (floor) => {
-    const random = mulberry32(Math.round(floor * 100));
-    for (let run = 0; run < 5000; run++) {
-      const a = randomSlug(random);
-      const b = random() < 0.6 ? mutate(random, a) : randomSlug(random);
-      const full = titleSimilarity(a, b);
+  it.each([SUGGEST_SCORE, AUTO_MERGE_SCORE, 0.5])(
+    "answers exactly what titleSimilarity does, at a floor of %d",
+    (floor) => {
+      const random = mulberry32(Math.round(floor * 100));
+      for (let run = 0; run < 5000; run++) {
+        const a = randomSlug(random);
+        const b = random() < 0.6 ? mutate(random, a) : randomSlug(random);
+        const full = titleSimilarity(a, b);
 
-      expect(titleSimilarityAtLeast(a, b, floor)).toEqual(
-        full.score >= floor ? full : null,
-      );
-    }
-  });
+        expect(titleSimilarityAtLeast(a, b, floor)).toEqual(
+          full.score >= floor ? full : null,
+        );
+      }
+    },
+  );
 });
 
 describe("levenshteinDistance", () => {

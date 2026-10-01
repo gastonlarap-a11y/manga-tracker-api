@@ -168,13 +168,14 @@ function blocked(candidates: readonly Candidate[]): string[] {
 }
 
 describe("candidatePairs", () => {
-  it.each([
-    1, 2, 3,
-  ])("finds every pair a full comparison finds (corpus %i)", (seed) => {
-    const candidates = corpus(400, seed);
+  it.each([1, 2, 3])(
+    "finds every pair a full comparison finds (corpus %i)",
+    (seed) => {
+      const candidates = corpus(400, seed);
 
-    expect(blocked(candidates)).toEqual(bruteForce(candidates));
-  });
+      expect(blocked(candidates)).toEqual(bruteForce(candidates));
+    },
+  );
 
   it("scores far fewer pairs than all of them", () => {
     const candidates = corpus(400, 7);

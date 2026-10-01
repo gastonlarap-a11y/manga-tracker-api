@@ -59,8 +59,9 @@ const postEventRoute = createRoute({
   path: "/events",
   tags: ["events"],
   request: {
-    // Required, so a body that is not JSON is refused with a 400. Optional,
-    // zod-openapi skips validation for another Content-Type and hands the
+    // Required, so a body that is not JSON is refused — with a 415 since
+    // zod-openapi 1.6 gates the declared media types, with a 400 before.
+    // Optional, it skipped validation for another Content-Type and handed the
     // handler `{}`, which it could only answer with a 500.
     body: {
       required: true,
