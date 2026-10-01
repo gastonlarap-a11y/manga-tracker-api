@@ -1,5 +1,6 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { bodyLimit } from "hono/body-limit";
+import { isTimeZone } from "../../lib/calendar-day";
 import { defaultHook, errorSchema } from "../../lib/http";
 import {
   mangaSchema,
@@ -13,6 +14,7 @@ import {
 import {
   deleteManga,
   fetchMangaCover,
+  getActivity,
   getLibrary,
   getMangaHistory,
   MAX_COVER_IMAGE_BYTES,
@@ -71,6 +73,33 @@ const libraryQuerySchema = z
   })
   .openapi("LibraryQuery");
 
+export const libraryActivitySchema = z
+  .object({
+    timeZone: z.string(),
+    // Oldest first, one entry per calendar day of the window, zeros included.
+    days: z.array(
+      z.object({
+        date: z.iso.date(),
+        chapters: z.number().int().nonnegative(),
+      }),
+    ),
+  })
+  .openapi("LibraryActivity");
+
+const activityQuerySchema = z
+  .object({
+    // 84 = twelve full weeks, what the dashboard's heatmap shows. Capped at a
+    // year and a week so a query cannot ask the server to format forever.
+    days: z.coerce.number().int().min(7).max(371).default(84),
+    // The reader's zone, from the dashboard. Without it, the server's own —
+    // which on the machine it runs on is usually the same one.
+    tz: z
+      .string()
+      .refine(isTimeZone, { message: "Unknown time zone" })
+      .optional(),
+  })
+  .openapi("LibraryActivityQuery");
+
 const mangaParamsSchema = z.object({ id: z.string() });
 
 const updateMangaBodySchema = z
@@ -104,6 +133,24 @@ const getLibraryRoute = createRoute({
     },
     400: {
       description: "Invalid query",
+      content: { "application/json": { schema: errorSchema } },
+    },
+  },
+});
+
+const getActivityRoute = createRoute({
+  method: "get",
+  path: "/library/activity",
+  tags: ["library"],
+  request: { query: activityQuerySchema },
+  responses: {
+    200: {
+      description:
+        "Distinct chapters read per calendar day in the given time zone, oldest first",
+      content: { "application/json": { schema: libraryActivitySchema } },
+    },
+    400: {
+      description: "Invalid query (days out of range, or an unknown time zone)",
       content: { "application/json": { schema: errorSchema } },
     },
   },
@@ -252,6 +299,13 @@ export const libraryRoutes = new OpenAPIHono({ defaultHook })
       })),
       200,
     );
+  })
+  .openapi(getActivityRoute, async (c) => {
+    const query = c.req.valid("query");
+    const timeZone =
+      query.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const days = await getActivity({ days: query.days, timeZone });
+    return c.json({ timeZone, days }, 200);
   })
   .openapi(getHistoryRoute, async (c) => {
     const { id } = c.req.valid("param");

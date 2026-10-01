@@ -4,12 +4,14 @@ import { prisma } from "../../db/client";
 import { errorSchema } from "../../lib/http";
 import { mangaSchema } from "../../lib/schemas";
 import {
+  libraryActivitySchema,
   libraryEntrySchema,
   libraryRoutes,
   mangaHistorySchema,
 } from "./library.routes";
 import {
   fetchMangaCover,
+  getActivity,
   MAX_COVER_IMAGE_BYTES,
   readBounded,
 } from "./library.service";
@@ -934,5 +936,111 @@ describe("readBounded", () => {
     });
 
     expect(await readBounded(response, 10)).toBeNull();
+  });
+});
+
+describe("getActivity", () => {
+  // 09:00 in Santiago (UTC-3 in October).
+  const now = new Date("2026-10-02T12:00:00.000Z");
+
+  function chapter(number: number, readAt: string, domain = "sitio-a.com") {
+    return { label: `Cap. ${number}`, number, domain, readAt };
+  }
+
+  it("counts a late-evening reading on the reader's day, not the UTC one", async () => {
+    await seedManga("solo-leveling", "Solo Leveling", [
+      chapter(10, "2026-10-02T02:30:00.000Z"), // Oct 1, 23:30 in Santiago
+      chapter(11, "2026-10-02T04:00:00.000Z"), // Oct 2, 01:00 in Santiago
+    ]);
+
+    const santiago = await getActivity({
+      days: 7,
+      timeZone: "America/Santiago",
+      now,
+    });
+    const utc = await getActivity({ days: 7, timeZone: "UTC", now });
+
+    expect(santiago.slice(-2)).toEqual([
+      { date: "2026-10-01", chapters: 1 },
+      { date: "2026-10-02", chapters: 1 },
+    ]);
+    expect(utc.at(-1)).toEqual({ date: "2026-10-02", chapters: 2 });
+  });
+
+  it("returns every day of the window, zeros included, ending today", async () => {
+    const days = await getActivity({ days: 7, timeZone: "UTC", now });
+
+    expect(days.map((day) => day.date)).toEqual([
+      "2026-09-26",
+      "2026-09-27",
+      "2026-09-28",
+      "2026-09-29",
+      "2026-09-30",
+      "2026-10-01",
+      "2026-10-02",
+    ]);
+    expect(days.every((day) => day.chapters === 0)).toBe(true);
+  });
+
+  it("counts a chapter read on two merged sites the same day once", async () => {
+    const canonical = await seedManga("dragona", "Dragona", [
+      chapter(2, "2026-10-02T08:00:00.000Z"),
+    ]);
+    const alias = await seedManga("dragon", "Dragón", [
+      chapter(2, "2026-10-02T09:00:00.000Z", "sitio-b.com"),
+      chapter(3, "2026-10-02T10:00:00.000Z", "sitio-b.com"),
+    ]);
+    await prisma.manga.update({
+      where: { id: alias.id },
+      data: { mergedIntoSlug: canonical.normalizedSlug },
+    });
+
+    const days = await getActivity({ days: 7, timeZone: "UTC", now });
+
+    expect(days.at(-1)).toEqual({ date: "2026-10-02", chapters: 2 });
+  });
+
+  it("leaves out a deleted card and readings older than the window", async () => {
+    const deleted = await seedManga("borrado", "Borrado", [
+      chapter(1, "2026-10-02T08:00:00.000Z"),
+    ]);
+    await prisma.manga.update({
+      where: { id: deleted.id },
+      data: { deletedAt: new Date() },
+    });
+    await seedManga("viejo", "Viejo", [chapter(1, "2026-09-01T08:00:00.000Z")]);
+
+    const days = await getActivity({ days: 7, timeZone: "UTC", now });
+
+    expect(days.reduce((sum, day) => sum + day.chapters, 0)).toBe(0);
+  });
+});
+
+describe("GET /library/activity", () => {
+  it("defaults to twelve weeks and says which zone it counted in", async () => {
+    const res = await libraryRoutes.request(
+      "/library/activity?tz=America/Santiago",
+    );
+
+    expect(res.status).toBe(200);
+    const body = libraryActivitySchema.parse(await res.json());
+    expect(body.timeZone).toBe("America/Santiago");
+    expect(body.days).toHaveLength(84);
+  });
+
+  it("refuses a time zone it does not know", async () => {
+    const res = await libraryRoutes.request("/library/activity?tz=Mars/Base");
+
+    expect(res.status).toBe(400);
+    expect(errorSchema.parse(await res.json()).error).toBeString();
+  });
+
+  it("refuses a window outside a week to a year and a week", async () => {
+    for (const days of ["3", "400", "abc"]) {
+      const res = await libraryRoutes.request(
+        `/library/activity?days=${days}&tz=UTC`,
+      );
+      expect(res.status).toBe(400);
+    }
   });
 });
