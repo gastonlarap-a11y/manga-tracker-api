@@ -15,7 +15,8 @@ the user owns, off unless configured.
   in the library module because duplicates reads it too
 - `src/modules/<feature>/` — one vertical slice: `*.routes.ts` + `*.service.ts` + `*.test.ts`
   (plus extra colocated units when needed, e.g. `events/events.bus.ts`)
-- `src/modules/sync/` — optional two-way sync with Azure DocumentDB (`sync.target.ts` is the ONLY
+- `src/modules/sync/` — optional two-way sync with a MongoDB store — MongoDB Atlas since
+  2026-08-31, Azure DocumentDB before, wire-compatible either way (`sync.target.ts` is the ONLY
   file allowed to import `mongodb`; `sync.mapper.ts` is pure and driver-free)
 - `runtime/` — the manifest and lockfile the shipped tree installs its native driver from
 - `scripts/` — operator tools run by hand: `sync:inspect` (what the shared store holds),
@@ -276,7 +277,9 @@ the user owns, off unless configured.
     (0.75) is what `/duplicates` lists. Both live in `lib` because the ingestion needs them and
     modules never import each other.
   - `DuplicateDismissal` is the mandatory counterpart of the lower suggestion threshold: without
-    a way to reject a pair, a false positive returns on every load.
+    a way to reject a pair, a false positive returns on every load. And a dismissal can be taken
+    back (`GET /duplicates/dismissals`, `POST /duplicates/undismiss`): a pair dismissed by mistake
+    used to be hidden for good, with nothing on screen saying it was there.
   - **`/duplicates` never scores every pair.** That was quadratic — hours at 10 000 titles.
     `src/lib/duplicate-candidates.ts` files each title under keys such that two titles that
     could reach a suggestion always share one (word deletion neighbourhoods of depth ⌊L/5⌋,
@@ -306,7 +309,7 @@ the user owns, off unless configured.
   notifications.
 - Only `src/config.ts` reads env vars; everything else receives values from it
   (`DATABASE_URL`, `PORT`, and the optional `MONGODB_URL` / `MONGODB_DB`).
-- Azure DocumentDB is a **shared store several machines converge on**, never a read path: SQLite
+- The MongoDB store is a **shared store several machines converge on**, never a read path: SQLite
   answers every request, and a sync only runs on the scheduler's triggers. Never make a request
   handler read from it — that would make the library depend on connectivity.
 - Convergence rules, and why they are not negotiable:
@@ -322,8 +325,11 @@ the user owns, off unless configured.
     **slug** for the same reason documents are: a local uuid means nothing to a peer. A pointer
     to a slug that has not arrived yet is kept as written and resolves on the next pass — never
     cleared, or the two machines would strip each other's merge forever.
-  - `DuplicateDismissal` is a set union keyed by the ordered slug pair, exactly like
-    `ReadingEvent`: nothing is ever removed for being absent on one side.
+  - `DuplicateDismissal` is keyed by the ordered slug pair and merges last-write-wins on
+    `updatedAt`, like `Manga`. Taking a dismissal back is `revokedAt`, a value that converges —
+    **never a deleted row**: nothing is ever removed for being absent on one side, so a deleted
+    row would come straight back from the replica. A document from before `revokedAt` reads as
+    a dismissal last written when it was created, so any later word on the pair beats it.
   - Documents are keyed by natural keys (`normalizedSlug`, `domain`), not by the local uuid, so
     two machines that discover the same title separately merge instead of colliding on the
     unique slug index.

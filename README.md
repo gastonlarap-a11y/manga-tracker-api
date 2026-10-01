@@ -10,7 +10,8 @@ Local-first personal manga reading tracker. A REST API built with Bun + Hono 4 +
 reading progress through content-script heuristics, and by a same-origin static web dashboard.
 Everything runs locally: single instance, no background scraping, and SQLite is the only source
 of truth for reads and writes. Reading progress is stored as append-only events (event sourcing);
-current state is derived by projection. An optional two-way sync with Azure DocumentDB gives
+current state is derived by projection. An optional two-way sync with a MongoDB store (MongoDB
+Atlas; Azure DocumentDB until 2026-08) gives
 off-site durability and lets several machines share one library — it never sits in the request
 path, so the tracker behaves identically with no network.
 
@@ -127,7 +128,7 @@ lint/typecheck/tests, and every command takes `--vault <name>` to target a diffe
 Interactive Swagger UI at [`/docs`](http://127.0.0.1:5150/docs); the OpenAPI 3.1 spec is
 generated from the Zod route schemas and served at `/openapi.json`.
 
-## Off-site sync (Azure DocumentDB)
+## Off-site sync (MongoDB Atlas)
 
 Optional. SQLite still answers every read and write — the cluster never sits in a request path —
 but it is no longer the only writer: several machines converge on one shared store, so switching
@@ -150,13 +151,15 @@ To look at the shared store itself rather than the sync state, run `bun run sync
 - **Deleting** a manga sets `deletedAt` instead of dropping the row, so the deletion travels as a
   fact and converges under the same rule. Reading the series again brings it back with its
   history.
+- **"Not the same manga"** is a dismissal keyed by the pair of slugs, newest `updatedAt` wins;
+  taking one back sets `revokedAt` rather than deleting it, for the same reason.
 - Documents are keyed by `normalizedSlug`, not by the local uuid, so two machines that discover
   the same title separately merge instead of colliding.
 
 Syncs run 5 s after any library change, at boot, and every 6 h. Cover bytes ride the 6 h pass
 because they are slow (~790 ms per MB against the cluster) and would otherwise sit in the path of
 recording a chapter. That periodic traffic also keeps a free-tier cluster from being paused for
-inactivity at 60 days.
+inactivity.
 
 ### Using a second machine
 

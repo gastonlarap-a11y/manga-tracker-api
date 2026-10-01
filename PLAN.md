@@ -8,9 +8,21 @@
 > `src/config.ts` como único lector de env, `src/db/client.ts`, y Prisma 7 con el generador nuevo
 > `prisma-client`. Los bloques de código de abajo fueron corregidos para reflejarlo.
 
+> **Estado (oct 2026): todas las fases en uso.** Este documento es el plan con el que se
+> construyó, y queda como registro de las decisiones; el estado vivo está en el `AGENTS.md` de
+> cada repo. Lo que cambió desde julio:
+> - Se instala con **`manga-tracker-desktop`** (macOS Apple Silicon y Windows x64, desde GitHub
+>   Releases): copia el backend con su propio Bun, lo registra como servicio del sistema y
+>   muestra el dashboard. El LaunchAgent a mano de la Fase 3 quedó para desarrollo.
+> - La extensión está publicada en la **Chrome Web Store** (aprobada el 2026-08-10).
+> - El sync usa **MongoDB Atlas M0** desde el 2026-08-31 (antes Azure DocumentDB; el driver no
+>   cambió).
+> - Desde v0.1.19 (2026-10-01) la biblioteca es una proyección mantenida por triggers y el
+>   dashboard la pide paginada: pensada para 10 000 series y un millón de lecturas.
+
 ## Objetivo
 
-Herramienta local en macOS que trackea automáticamente qué manga/manhwa se lee en cualquier sitio, en qué capítulo, y sobrevive al cambio de servidor de esos sitios. Datos en SQLite local, sin dependencia de servicios externos.
+Herramienta local en macOS y Windows que trackea automáticamente qué manga/manhwa se lee en cualquier sitio, en qué capítulo, y sobrevive al cambio de servidor de esos sitios. Datos en SQLite local, sin dependencia de servicios externos (el sync a un MongoDB propio es opcional).
 
 ## Constraints críticos
 
@@ -197,10 +209,13 @@ Docs: https://www.prisma.io/docs/orm/overview/databases/sqlite · https://www.pr
 
 ### Fase 3 — LaunchAgent (backend automático)
 
-> **Estado (jul 2026): hecha.** Instalado y validado (health + kill/auto-restart); pendiente
-> solo el test de reinicio de la Mac. Nota: el binario de bun viene de mise
-> (`~/.local/share/mise/installs/bun/latest/bin/bun`), no de Homebrew. Ver
-> `.claude/skills/deploy/`.
+> **Estado (jul 2026): hecha.** Instalado y validado (health + kill/auto-restart). Nota: el
+> binario de bun viene de mise (`~/.local/share/mise/installs/bun/latest/bin/bun`), no de
+> Homebrew. Ver `.claude/skills/deploy/`.
+>
+> **Desde agosto 2026** el servicio lo registra `manga-tracker-desktop`, con el Bun que trae su
+> payload y un launcher que lee la credencial del sync del Keychain; este LaunchAgent a mano
+> quedó para la máquina de desarrollo.
 
 **Este es el paso que resuelve el "no quiero estar levantando nada".** Se hace ahora, no al final.
 
@@ -396,7 +411,8 @@ Docs: https://learn.microsoft.com/windows/win32/taskschd/ · https://bun.sh/docs
 
 ### Fase 4 — Extensión esqueleto (MV3)
 
-> **Estado (jul 2026): hecha (código); pendiente la verificación manual en navegadores.**
+> **Estado: hecha y en uso** (código en jul 2026; publicada en la Chrome Web Store el
+> 2026-08-10).
 > **Decisión: WXT en lugar de CRXJS** — a jul 2026 WXT tiene CLI con soporte Bun nativo,
 > manifest auto-generado desde `wxt.config.ts`, entrypoints por archivo y mejor HMR; CRXJS
 > exige scaffolding vía npm y manifest manual. Plasmo está en modo mantenimiento.
@@ -427,7 +443,8 @@ Docs: https://wxt.dev/guide/installation.html · https://developer.chrome.com/do
 
 ### Fase 5 — Handshake end-to-end con botón manual
 
-> **Estado (jul 2026): hecha (código); pendiente la verificación manual end-to-end.**
+> **Estado: hecha y en uso** (código en jul 2026; verificada de punta a punta por el uso real,
+> que registra lecturas de varios sitios desde agosto).
 > Implementado: content script con `registration: "runtime"` (inyectado bajo demanda con
 > `activeTab` + `scripting`, devuelve `{title, url}` de la página) y botón "Enviar evento
 > test" en el popup que arma el payload con datos reales de la pestaña activa.
@@ -436,7 +453,7 @@ Content script inyectado bajo demanda. Botón temporal en el popup "Enviar event
 
 ### Fase 6 — Heurística automática
 
-> **Estado (jul 2026): hecha (código); pendiente la verificación manual.** El tracking es
+> **Estado: hecha y en uso** (código en jul 2026). El tracking es
 > opt-in por sitio: botón "Trackear este sitio" en el popup → `permissions.request()` del
 > origen → el background registra `detector.content.ts` para ese origen
 > (`scripting.registerContentScripts`, persistente). Sin capítulo en la URL (páginas
@@ -536,12 +553,15 @@ Vistas:
 - `/manga/:id` — historial completo.
 - `/duplicates` — sugerencias de merge.
 
-### Fase 11 — Export/import (opcional) — ✅ cubierta por la réplica en Azure
+### Fase 11 — Export/import (opcional) — ✅ cubierta por el sync a MongoDB
 
 Resuelta de otra forma: en vez de `GET /api/export` + `POST /api/import` sobre un JSON, el
-módulo `src/modules/sync/` replica la base a **Azure DocumentDB** (free tier, 32 GB) y la
-reconstruye con `POST /api/sync/restore`. Da lo mismo que buscaba el export (portabilidad) y
-además durabilidad fuera de la máquina, sin un formato de archivo propio que mantener.
+módulo `src/modules/sync/` sincroniza la base con un **MongoDB propio** y la reconstruye con
+`POST /api/sync/restore`. Da lo mismo que buscaba el export (portabilidad) y además durabilidad
+fuera de la máquina, sin un formato de archivo propio que mantener. Empezó en Azure DocumentDB
+(free tier, 32 GB); desde el 2026-08-31 es **MongoDB Atlas M0**, sin cambios de código: el
+cluster de Azure dejó de contestar y Atlas habla el mismo protocolo. Apuntar a un cluster vacío
+lo repuebla solo, porque el sync es bidireccional y SQLite manda.
 
 Decisiones que quedaron fijadas al implementarla:
 - **La nube nunca está en el camino de un request.** SQLite contesta todas las lecturas y
@@ -549,9 +569,9 @@ Decisiones que quedaron fijadas al implementarla:
   entre archivo local y cluster remoto las copias divergen y la biblioteca pasaría a depender de
   la conectividad.
 - **Sincronización bidireccional**, no réplica: cada corrida trae, mezcla y después empuja, así
-  cambiar de computador no requiere ninguna acción. Eventos por unión de conjuntos, mangas y
-  adapters por `updatedAt` más nuevo, borrado como `deletedAt`, documentos identificados por
-  `normalizedSlug`.
+  cambiar de computador no requiere ninguna acción. Eventos por unión de conjuntos, mangas,
+  adapters y pares descartados por `updatedAt` más nuevo, borrado como `deletedAt` (y "volver a
+  sugerir" un par como `revokedAt`), documentos identificados por `normalizedSlug`.
 - **Nada se borra nunca por estar ausente de un lado.** La primera versión sí lo hacía, y eso
   implicaba que volver a una PC desactualizada y leer un capítulo borraba de la nube lo leído en
   la otra.
@@ -571,6 +591,9 @@ Decisiones que quedaron fijadas al implementarla:
 **Rendimiento:**
 - Índice compuesto `(mangaId, readAt)` para el query de librería.
 - Volumen esperado: decenas de eventos por día, `.db` <5MB con 10k rows.
+- Desde v0.1.19 el diseño apunta a 10 000 series y un millón de lecturas: la biblioteca es una
+  proyección que mantienen triggers de SQLite y se lee paginada (`bun run bench:library` mide
+  cada lectura a esa escala).
 
 **Mantenimiento:**
 - `bun outdated` + `bun update` cada 6 meses.

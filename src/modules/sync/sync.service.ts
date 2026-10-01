@@ -214,34 +214,48 @@ export async function syncWithReplica(
     }
   }
 
-  // ---- Dismissed duplicate pairs: set union, never a deletion -------------
-  // A rejected suggestion is a judgement the user made once; it must hold on
-  // every machine, and (like events) absence on one side only ever means "not
-  // synced yet". Nothing here is ever removed.
+  // ---- Dismissed duplicate pairs: last-write-wins, never a deletion -------
+  // A judgement the user made on a pair — "not the same", or later "suggest it
+  // again" — must hold on every machine, and the newest word on it wins. Like
+  // events, absence on one side only ever means "not synced yet", so nothing
+  // here is removed: taking a dismissal back is `revokedAt`, a value.
   const remoteDismissals = (await target.readDismissals())
     .map(fromDismissalDoc)
     .filter((row): row is NonNullable<typeof row> => row !== null);
   const localDismissals = await prisma.duplicateDismissal.findMany();
-  const localDismissalKeys = new Set(
-    localDismissals.map((row) => `${row.slugA}|${row.slugB}`),
+  const localDismissalByKey = new Map(
+    localDismissals.map((row) => [`${row.slugA}|${row.slugB}`, row]),
   );
 
   const newDismissals = remoteDismissals.filter(
-    (remote) => !localDismissalKeys.has(`${remote.slugA}|${remote.slugB}`),
+    (remote) => !localDismissalByKey.has(`${remote.slugA}|${remote.slugB}`),
   );
   if (newDismissals.length > 0) {
-    // The row carries no mutable state, so a pair known on both sides needs no
-    // conflict resolution at all — only the genuinely new ones are inserted.
-    // (createMany's skipDuplicates is not available on SQLite.)
+    // (createMany's skipDuplicates is not available on SQLite, hence the
+    // filter above.)
     await prisma.duplicateDismissal.createMany({
       data: newDismissals.map((remote) => ({
         slugA: remote.slugA,
         slugB: remote.slugB,
         createdAt: remote.createdAt,
-        updatedAt: remote.createdAt,
+        updatedAt: remote.updatedAt,
+        revokedAt: remote.revokedAt,
       })),
     });
-    pulled.dismissals = newDismissals.length;
+    pulled.dismissals += newDismissals.length;
+  }
+  for (const remote of remoteDismissals) {
+    const local = localDismissalByKey.get(`${remote.slugA}|${remote.slugB}`);
+    if (
+      local !== undefined &&
+      remote.updatedAt.getTime() > local.updatedAt.getTime()
+    ) {
+      await prisma.duplicateDismissal.update({
+        where: { slugA_slugB: { slugA: remote.slugA, slugB: remote.slugB } },
+        data: { updatedAt: remote.updatedAt, revokedAt: remote.revokedAt },
+      });
+      pulled.dismissals += 1;
+    }
   }
 
   // ---- Push whatever is newer or missing on the other side ----------------
@@ -300,11 +314,19 @@ export async function syncWithReplica(
   await target.upsertAdapters(adapterDocsToPush);
   pushed.adapters = adapterDocsToPush.length;
 
-  const remoteDismissalKeys = new Set(
-    remoteDismissals.map((row) => `${row.slugA}|${row.slugB}`),
+  // The rows as they were before the pull: one the pull replaced was older
+  // than its remote, and one it created was never here, so neither is pushed.
+  const remoteDismissalByKey = new Map(
+    remoteDismissals.map((row) => [`${row.slugA}|${row.slugB}`, row]),
   );
   const dismissalDocsToPush = localDismissals
-    .filter((row) => !remoteDismissalKeys.has(`${row.slugA}|${row.slugB}`))
+    .filter((row) => {
+      const remote = remoteDismissalByKey.get(`${row.slugA}|${row.slugB}`);
+      return (
+        remote === undefined ||
+        row.updatedAt.getTime() > remote.updatedAt.getTime()
+      );
+    })
     .map(toDismissalDoc);
   await target.upsertDismissals(dismissalDocsToPush);
   pushed.dismissals = dismissalDocsToPush.length;

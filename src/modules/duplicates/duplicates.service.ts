@@ -113,7 +113,9 @@ async function scorePairs(): Promise<ScoredPair[]> {
       select: { id: true, normalizedSlug: true, coverUrl: true },
       orderBy: { createdAt: "asc" },
     }),
+    // A dismissal taken back is a pair worth suggesting again.
     prisma.duplicateDismissal.findMany({
+      where: { revokedAt: null },
       select: { slugA: true, slugB: true },
     }),
   ]);
@@ -351,11 +353,94 @@ export async function dismissDuplicatePair(
   await prisma.duplicateDismissal.upsert({
     where: { slugA_slugB: key },
     create: { ...key, updatedAt: now },
-    update: { updatedAt: now },
+    // Dismissing a pair taken back revives the same row: one row per pair,
+    // and the newest word on it is the one every machine converges on.
+    update: { updatedAt: now, revokedAt: null },
   });
 
   publishLibraryChanged();
   return { kind: "dismissed", ...key };
+}
+
+/** A side of a dismissed pair, or null when that title is not on this machine. */
+export type DismissedSide = PairSide | null;
+
+export interface Dismissal {
+  slugA: string;
+  slugB: string;
+  /** When the pair was last dismissed. */
+  dismissedAt: Date;
+  a: DismissedSide;
+  b: DismissedSide;
+}
+
+/**
+ * Every pair currently dismissed, the most recent first — what the user said
+ * "no son el mismo" about, so it can be taken back.
+ *
+ * Read by slug, because that is what a dismissal holds: a side can be missing
+ * here (a title another machine dismissed and this one has not synced yet),
+ * and the pair is still listed, by its slug, rather than hidden.
+ */
+export async function listDismissals(): Promise<Dismissal[]> {
+  const dismissals = await prisma.duplicateDismissal.findMany({
+    where: { revokedAt: null },
+    orderBy: { updatedAt: "desc" },
+  });
+  const slugs = [
+    ...new Set(dismissals.flatMap((row) => [row.slugA, row.slugB])),
+  ];
+  const rows = await inChunks(slugs, (chunk) =>
+    prisma.manga.findMany({
+      where: { normalizedSlug: { in: chunk } },
+      omit: { coverImage: true },
+    }),
+  );
+  const stored = await storedCoverIds(rows.map((row) => row.id));
+  const bySlug = new Map(
+    rows.map((row) => [
+      row.normalizedSlug,
+      { ...row, hasStoredCover: stored.has(row.id) },
+    ]),
+  );
+  return dismissals.map((row) => ({
+    slugA: row.slugA,
+    slugB: row.slugB,
+    dismissedAt: row.updatedAt,
+    a: bySlug.get(row.slugA) ?? null,
+    b: bySlug.get(row.slugB) ?? null,
+  }));
+}
+
+export type UndismissOutcome =
+  | { kind: "undismissed"; slugA: string; slugB: string }
+  | { kind: "not-found" };
+
+/**
+ * "Volver a sugerir": the pair is a suggestion again, here and — after the
+ * next sync — on every machine. Taking back a pair already taken back changes
+ * nothing; a pair never dismissed is not found.
+ */
+export async function undismissDuplicatePair(
+  slugA: string,
+  slugB: string,
+): Promise<UndismissOutcome> {
+  const key = dismissalKey(slugA, slugB);
+  const row = await prisma.duplicateDismissal.findUnique({
+    where: { slugA_slugB: key },
+  });
+  if (row === null) {
+    return { kind: "not-found" };
+  }
+  if (row.revokedAt === null) {
+    const now = new Date();
+    await prisma.duplicateDismissal.update({
+      where: { slugA_slugB: key },
+      data: { revokedAt: now, updatedAt: now },
+    });
+    publishLibraryChanged();
+  }
+  return { kind: "undismissed", ...key };
 }
 
 // Tags are a JSON string column; tagsFromJson degrades a corrupt value to [],

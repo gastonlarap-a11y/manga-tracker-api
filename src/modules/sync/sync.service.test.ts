@@ -4,7 +4,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { prisma } from "../../db/client";
 import { createFakeTarget, type FakeTarget } from "./sync.fake-target";
-import type { MangaDoc, ReadingEventDoc } from "./sync.mapper";
+import type { DismissalDoc, MangaDoc, ReadingEventDoc } from "./sync.mapper";
 import { restoreFromReplica, syncWithReplica } from "./sync.service";
 
 const sync = (target: FakeTarget, covers = false) =>
@@ -478,18 +478,36 @@ describe("Sync: a merge decided on one machine reaches the others", () => {
   });
 });
 
-describe("Sync: rejected duplicate pairs converge as a union", () => {
+describe("Sync: rejected duplicate pairs converge, last write wins", () => {
+  const T0 = new Date("2026-01-01T00:00:00.000Z");
+  const T1 = new Date("2026-02-01T00:00:00.000Z");
+  const T2 = new Date("2026-03-01T00:00:00.000Z");
+  const PAIR = "one-piece|one-punch-man";
+
+  function dismissalDoc(overrides: Partial<DismissalDoc> = {}): DismissalDoc {
+    return {
+      _id: PAIR,
+      slugA: "one-piece",
+      slugB: "one-punch-man",
+      createdAt: T0,
+      updatedAt: T0,
+      revokedAt: null,
+      ...overrides,
+    };
+  }
+
+  async function localPair() {
+    return prisma.duplicateDismissal.findUniqueOrThrow({
+      where: { slugA_slugB: { slugA: "one-piece", slugB: "one-punch-man" } },
+    });
+  }
+
   it("pulls a peer's dismissal and pushes its own, without ever removing one", async () => {
     const target = createFakeTarget();
     await prisma.duplicateDismissal.create({
       data: { slugA: "berserk", slugB: "berserk-gaiden" },
     });
-    target.dismissals.set("one-piece|one-punch-man", {
-      _id: "one-piece|one-punch-man",
-      slugA: "one-piece",
-      slugB: "one-punch-man",
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    target.dismissals.set(PAIR, dismissalDoc());
 
     const result = await sync(target);
 
@@ -505,14 +523,88 @@ describe("Sync: rejected duplicate pairs converge as a union", () => {
     expect(await prisma.duplicateDismissal.count()).toBe(2);
   });
 
+  it("reads a document written before dismissals could be taken back", async () => {
+    const target = createFakeTarget();
+    // Cast justified: the replica holds documents older versions wrote, with
+    // neither updatedAt nor revokedAt — exactly what this test feeds in.
+    target.dismissals.set(PAIR, {
+      _id: PAIR,
+      slugA: "one-piece",
+      slugB: "one-punch-man",
+      createdAt: T0,
+    } as unknown as DismissalDoc);
+
+    await sync(target);
+
+    const local = await localPair();
+    expect(local.revokedAt).toBeNull();
+    expect(local.updatedAt).toEqual(T0);
+  });
+
+  it("carries a peer's take-back here", async () => {
+    const target = createFakeTarget();
+    await prisma.duplicateDismissal.create({
+      data: {
+        slugA: "one-piece",
+        slugB: "one-punch-man",
+        createdAt: T0,
+        updatedAt: T0,
+      },
+    });
+    target.dismissals.set(PAIR, dismissalDoc({ updatedAt: T1, revokedAt: T1 }));
+
+    const result = await sync(target);
+
+    expect(result.pulled.dismissals).toBe(1);
+    expect(result.pushed.dismissals).toBe(0);
+    expect((await localPair()).revokedAt).toEqual(T1);
+  });
+
+  it("pushes a take-back made here over the peer's older dismissal", async () => {
+    const target = createFakeTarget();
+    await prisma.duplicateDismissal.create({
+      data: {
+        slugA: "one-piece",
+        slugB: "one-punch-man",
+        createdAt: T0,
+        updatedAt: T1,
+        revokedAt: T1,
+      },
+    });
+    target.dismissals.set(PAIR, dismissalDoc());
+
+    const result = await sync(target);
+
+    expect(result.pushed.dismissals).toBe(1);
+    expect(target.dismissals.get(PAIR)?.revokedAt).toEqual(T1);
+    expect((await localPair()).revokedAt).toEqual(T1);
+  });
+
+  it("lets a newer dismissal win over an older take-back, and removes nothing", async () => {
+    const target = createFakeTarget();
+    await prisma.duplicateDismissal.create({
+      data: {
+        slugA: "one-piece",
+        slugB: "one-punch-man",
+        createdAt: T0,
+        updatedAt: T1,
+        revokedAt: T1,
+      },
+    });
+    target.dismissals.set(PAIR, dismissalDoc({ updatedAt: T2 }));
+
+    await sync(target);
+    await sync(target);
+
+    expect((await localPair()).revokedAt).toBeNull();
+    expect(target.dismissals.get(PAIR)?.revokedAt).toBeNull();
+    expect(await prisma.duplicateDismissal.count()).toBe(1);
+    expect(target.dismissals.size).toBe(1);
+  });
+
   it("skips a malformed document instead of failing the sync", async () => {
     const target = createFakeTarget();
-    target.dismissals.set("broken", {
-      _id: "broken",
-      slugA: "",
-      slugB: "one-piece",
-      createdAt: new Date("2026-01-01T00:00:00.000Z"),
-    });
+    target.dismissals.set("broken", dismissalDoc({ _id: "broken", slugA: "" }));
 
     const result = await sync(target);
     expect(result.pulled.dismissals).toBe(0);
