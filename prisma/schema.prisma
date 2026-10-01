@@ -106,6 +106,99 @@ model ReadingEvent {
   @@index([mangaId, readAt(sort: Desc)])
   // Drives the "which manga is this series?" lookup on every ingestion.
   @@index([seriesKey])
+  // The activity panel reads one window of days, never the whole log.
+  @@index([readAt])
+}
+
+// ------------------------------------------------------
+// Read model: the library projection
+// ------------------------------------------------------
+// Everything below is derived from Manga and ReadingEvent and never synced:
+// each machine builds its own from the rows it has. It exists so that reading
+// the library costs what is shown, not what was ever read — the projection used
+// to be recomputed per request from every manga, every event and every stored
+// cover's bytes.
+//
+// Kept current by triggers (see the migration that creates these tables), not
+// by the code paths that write: ingestion, edits, merges, deletes and sync all
+// write Manga and ReadingEvent, and a trigger cannot be forgotten by a new one.
+
+/// One row per card: an alive canonical manga with the aggregates of its whole
+/// group (its own events plus those of every alias merged into it).
+model LibraryEntry {
+  /// The canonical manga that owns the card.
+  mangaId          String   @id
+  canonicalName    String
+  normalizedSlug   String
+  /// canonicalName lowercased and stripped of accents, for search.
+  searchKey        String
+  /// What A–Z orders by: the search key, so "Ásura" sorts beside "Asura".
+  sortKey          String
+  coverUrl         String?
+  coverVersion     Int
+  hasStoredCover   Boolean
+  status           String
+  tags             String
+  reachedNumber    Float?
+  reachedLabel     String?
+  /// The newest event of the group; the epoch for a card with none yet (its
+  /// events have not synced in), so ordering never has to handle a null.
+  lastReadAt       DateTime
+  lastChapterLabel String?
+  lastSourceUrl    String?
+  /// Distinct chapters, not rows — the same rule as ever.
+  readCount        Int
+  /// JSON array, most recently read first: the cover proxy tries their
+  /// referers in this order.
+  sourceDomains    String
+  aliasCount       Int
+
+  domains LibraryEntryDomain[]
+
+  @@index([lastReadAt(sort: Desc), mangaId])
+  @@index([status, lastReadAt(sort: Desc), mangaId])
+  @@index([sortKey, mangaId])
+  @@index([readCount(sort: Desc), mangaId])
+}
+
+/// The sites a card was read on, one row each, so filtering by site and
+/// counting sites are index lookups rather than scans of a JSON column.
+model LibraryEntryDomain {
+  mangaId String
+  domain  String
+
+  entry LibraryEntry @relation(fields: [mangaId], references: [mangaId], onDelete: Cascade)
+
+  @@id([mangaId, domain])
+  @@index([domain])
+}
+
+/// Which card every manga row belongs to, deleted ones included: the history,
+/// cover and edit endpoints resolve any id — an alias's too — with one lookup.
+model LibraryMember {
+  memberId    String @id
+  canonicalId String
+
+  @@index([canonicalId])
+}
+
+/// Manga rows whose card has to be recomputed, marked by the triggers. `seq`
+/// lets a refresh clear exactly what it processed and keep anything marked
+/// while it ran.
+model LibraryDirty {
+  mangaId String @id
+  seq     Int
+
+  // Every trigger reads MAX(seq): indexed, that is a lookup however many
+  // marks a large sync pull leaves behind, not a scan per inserted event.
+  @@index([seq])
+}
+
+/// A counter the triggers bump whenever what /duplicates could answer changes:
+/// a title, a cover, a merge, a deletion or a dismissal. Readings do not.
+model LibraryRevision {
+  id     Int @id
+  titles Int
 }
 
 // ------------------------------------------------------

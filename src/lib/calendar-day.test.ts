@@ -24,6 +24,36 @@ describe("calendarDayIn", () => {
       "2026-03-04",
     );
   });
+
+  it.each([
+    "America/Santiago",
+    "Asia/Kathmandu",
+    "Pacific/Chatham",
+    "Australia/Lord_Howe",
+    "Asia/Kolkata",
+    "Europe/London",
+  ])("remembers quarter hours without ever changing an answer (%s)", (zone) => {
+    // A year every seven minutes — so each quarter hour is first asked at a
+    // different point of it — through every midnight and daylight-saving
+    // change, Santiago's midnight fall-back included, against Intl asked
+    // directly, which remembers nothing.
+    const remembered = calendarDayIn(zone);
+    const direct = new Intl.DateTimeFormat("en-CA", {
+      timeZone: zone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+    const start = Date.UTC(2026, 0, 1);
+    for (let minute = 0; minute < 366 * 24 * 60; minute += 7) {
+      const instant = new Date(start + minute * 60_000);
+      const fresh = direct.format(instant);
+
+      if (remembered(instant) !== fresh) {
+        throw new Error(`${zone} at ${instant.toISOString()}: not ${fresh}`);
+      }
+    }
+  });
 });
 
 describe("daysEndingOn", () => {

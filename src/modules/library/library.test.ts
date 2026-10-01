@@ -6,7 +6,9 @@ import { mangaSchema } from "../../lib/schemas";
 import {
   libraryActivitySchema,
   libraryEntrySchema,
+  libraryPageSchema,
   libraryRoutes,
+  librarySummarySchema,
   mangaHistorySchema,
 } from "./library.routes";
 import {
@@ -1042,5 +1044,187 @@ describe("GET /library/activity", () => {
       );
       expect(res.status).toBe(400);
     }
+  });
+});
+
+describe("GET /library/page", () => {
+  async function seedShelf() {
+    const read = (label: string, readAt: string, domain = "a.com") => ({
+      label,
+      number: Number(label.replace(/\D/g, "")) || null,
+      domain,
+      readAt,
+    });
+    await seedManga("zetman", "Zetman", [
+      read("Cap. 1", "2026-07-01T10:00:00.000Z"),
+    ]);
+    await seedManga("asura", "Ásura", [
+      read("Cap. 1", "2026-07-02T10:00:00.000Z"),
+      read("Cap. 2", "2026-07-03T10:00:00.000Z", "b.com"),
+      read("Cap. 3", "2026-07-04T10:00:00.000Z"),
+    ]);
+    const done = await seedManga("berserk", "Berserk", [
+      read("Cap. 9", "2026-07-05T10:00:00.000Z"),
+      read("Cap. 10", "2026-07-06T10:00:00.000Z"),
+    ]);
+    await prisma.manga.update({
+      where: { id: done.id },
+      data: { status: "completed", tags: JSON.stringify(["accion", "seinen"]) },
+    });
+    await seedManga("invocacion", "Invocación", [
+      read("Cap. 7", "2026-07-07T10:00:00.000Z", "b.com"),
+    ]);
+  }
+
+  async function names(query: string) {
+    const res = await libraryRoutes.request(`/library/page?${query}`);
+    expect(res.status).toBe(200);
+    const page = libraryPageSchema.parse(await res.json());
+    return { names: page.items.map((item) => item.canonicalName), page };
+  }
+
+  /** Every page, following nextCursor until there is none. */
+  async function walk(query: string) {
+    const seen: string[] = [];
+    let cursor: string | null = null;
+    do {
+      const { page } = await names(
+        `${query}&limit=2${cursor ? `&cursor=${cursor}` : ""}`,
+      );
+      seen.push(...page.items.map((item) => item.canonicalName));
+      cursor = page.nextCursor;
+    } while (cursor !== null);
+    return seen;
+  }
+
+  it("walks the whole library page by page in every order", async () => {
+    await seedShelf();
+
+    expect(await walk("sort=recent")).toEqual([
+      "Invocación",
+      "Berserk",
+      "Ásura",
+      "Zetman",
+    ]);
+    // Accents ignored: Ásura sorts as asura.
+    expect(await walk("sort=title")).toEqual([
+      "Ásura",
+      "Berserk",
+      "Invocación",
+      "Zetman",
+    ]);
+    // Invocación and Zetman tie on one chapter; the tie-break is the id, a
+    // random uuid here, so only their place after the others is fixed.
+    const byChapters = await walk("sort=chapters");
+    expect(byChapters.slice(0, 2)).toEqual(["Ásura", "Berserk"]);
+    expect(byChapters.slice(2).toSorted()).toEqual(["Invocación", "Zetman"]);
+  });
+
+  it("filters by status, site and every tag asked for", async () => {
+    await seedShelf();
+
+    expect((await names("status=completed")).names).toEqual(["Berserk"]);
+    expect((await names("domain=b.com")).names).toEqual([
+      "Invocación",
+      "Ásura",
+    ]);
+    expect((await names("tags=accion,seinen")).names).toEqual(["Berserk"]);
+    expect((await names("tags=accion,romance")).names).toEqual([]);
+  });
+
+  it("searches the title ignoring accents and case", async () => {
+    await seedShelf();
+
+    expect((await names("q=INVOCACION")).names).toEqual(["Invocación"]);
+    expect((await names("q=asu")).names).toEqual(["Ásura"]);
+  });
+
+  it("starts over from the first page on a cursor it did not write", async () => {
+    await seedShelf();
+
+    const { names: fromGarbage } = await names("cursor=not-a-cursor&limit=10");
+
+    expect(fromGarbage).toHaveLength(4);
+  });
+
+  it("caps a page at 200 cards", async () => {
+    const res = await libraryRoutes.request("/library/page?limit=500");
+
+    expect(res.status).toBe(400);
+  });
+});
+
+describe("GET /library/summary", () => {
+  it("totals the library without listing it", async () => {
+    const recent = new Date(Date.now() - 86_400_000).toISOString();
+    const reading = await seedManga("solo", "Solo", [
+      { label: "Cap. 1", number: 1, domain: "a.com", readAt: recent },
+      { label: "Cap. 2", number: 2, domain: "b.com", readAt: recent },
+    ]);
+    const finished = await seedManga("viejo", "Viejo", [
+      {
+        label: "Cap. 5",
+        number: 5,
+        domain: "a.com",
+        readAt: "2025-01-01T10:00:00.000Z",
+      },
+    ]);
+    await prisma.manga.update({
+      where: { id: finished.id },
+      data: { status: "completed", tags: JSON.stringify(["accion"]) },
+    });
+    await prisma.manga.update({
+      where: { id: reading.id },
+      data: { tags: JSON.stringify(["romance", "accion"]) },
+    });
+
+    const res = await libraryRoutes.request("/library/summary");
+
+    expect(res.status).toBe(200);
+    expect(librarySummarySchema.parse(await res.json())).toEqual({
+      counts: { reading: 1, completed: 1, dropped: 0, all: 2 },
+      chapters: 3,
+      sites: 2,
+      activeThisWeek: 1,
+      domains: ["a.com", "b.com"],
+      tags: ["accion", "romance"],
+    });
+  });
+});
+
+describe("GET /mangas/{id}/cover caching", () => {
+  async function seedWithStoredCover() {
+    const manga = await seedManga("tapa", "Tapa", [
+      {
+        label: "Cap. 1",
+        number: 1,
+        domain: "a.com",
+        readAt: "2026-07-01T10:00:00.000Z",
+      },
+    ]);
+    await prisma.manga.update({
+      where: { id: manga.id },
+      data: {
+        coverImage: new Uint8Array([1, 2, 3]),
+        coverImageType: "image/png",
+      },
+    });
+    return manga;
+  }
+
+  it("is immutable when the url names a version", async () => {
+    const manga = await seedWithStoredCover();
+
+    const res = await libraryRoutes.request(`/mangas/${manga.id}/cover?v=abc`);
+
+    expect(res.headers.get("cache-control")).toContain("immutable");
+  });
+
+  it("lives a day when it does not", async () => {
+    const manga = await seedWithStoredCover();
+
+    const res = await libraryRoutes.request(`/mangas/${manga.id}/cover`);
+
+    expect(res.headers.get("cache-control")).toBe("public, max-age=86400");
   });
 });

@@ -131,6 +131,48 @@ describe("GET /duplicates", () => {
   });
 });
 
+describe("GET /duplicates, remembered between requests", () => {
+  it("answers again once a title changes what it could find", async () => {
+    await prisma.manga.createMany({ data: [DRAGON_A, DRAGON_B] });
+    expect(await listDuplicates()).toHaveLength(1);
+
+    // The slug is what is scored; a new one is a different title.
+    await prisma.manga.update({
+      where: { normalizedSlug: DRAGON_B.normalizedSlug },
+      data: { normalizedSlug: "berserk", canonicalName: "Berserk" },
+    });
+
+    expect(await listDuplicates()).toEqual([]);
+  });
+
+  it("keeps its answer through a reading, and shows the rows as they are now", async () => {
+    const [a] = await prisma.manga.createManyAndReturn({
+      data: [DRAGON_A, DRAGON_B],
+    });
+    expect(await listDuplicates()).toHaveLength(1);
+
+    // Neither moves the revision: a reading cannot change a suggestion, and a
+    // status is read fresh with the rows.
+    await prisma.readingEvent.create({
+      data: {
+        mangaId: a?.id ?? "",
+        chapterLabel: "Cap. 1",
+        chapterNumber: 1,
+        sourceUrl: "https://a.com/1",
+        sourceDomain: "a.com",
+      },
+    });
+    await prisma.manga.update({
+      where: { normalizedSlug: DRAGON_A.normalizedSlug },
+      data: { status: "completed" },
+    });
+
+    const [pair] = await listDuplicates();
+    const statuses = [pair?.a.status, pair?.b.status];
+    expect(statuses).toContain("completed");
+  });
+});
+
 describe("POST /duplicates/dismiss", () => {
   it("keeps the rejected pair out of every later report", async () => {
     const a = await prisma.manga.create({ data: DRAGON_A });

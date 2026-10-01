@@ -84,11 +84,10 @@ export function applyMigrations(
       // last complete migration instead of halfway through a schema change.
       db.run("BEGIN");
       try {
-        for (const statement of sql.split(";")) {
-          if (statement.trim()) {
-            db.run(statement);
-          }
-        }
+        // The whole file in one call: bun:sqlite runs every statement in it.
+        // Splitting on ";" by hand, as this used to, cut a trigger's
+        // BEGIN … END body into fragments that are not SQL on their own.
+        db.run(sql);
         recordMigration(db, name, sql);
         db.run("COMMIT");
       } catch (cause) {

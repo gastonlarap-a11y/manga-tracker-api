@@ -1,9 +1,96 @@
 import { describe, expect, it } from "bun:test";
 import {
+  AUTO_MERGE_SCORE,
   levenshteinDistance,
   levenshteinSimilarity,
+  levenshteinWithin,
+  SUGGEST_SCORE,
   titleSimilarity,
+  titleSimilarityAtLeast,
 } from "./similarity";
+
+/** A seeded generator, so every run checks the same strings. */
+function mulberry32(seed: number): () => number {
+  let state = seed;
+  return () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** Random words from few letters, so close strings are common, not rare. */
+function randomSlug(random: () => number): string {
+  const words = 1 + Math.floor(random() * 6);
+  return Array.from({ length: words }, () =>
+    Array.from(
+      { length: 1 + Math.floor(random() * 9) },
+      () => "abcde"[Math.floor(random() * 5)],
+    ).join(""),
+  ).join("-");
+}
+
+/** The slug with a few letters changed, dropped or added — a near miss. */
+function mutate(random: () => number, slug: string): string {
+  let result = slug;
+  for (let edits = Math.floor(random() * 4); edits > 0; edits--) {
+    const at = Math.floor(random() * (result.length + 1));
+    const letter = "abcde-"[Math.floor(random() * 6)];
+    const kind = random();
+    result =
+      kind < 0.33
+        ? result.slice(0, at) + letter + result.slice(at + 1)
+        : kind < 0.66
+          ? result.slice(0, at) + result.slice(at + 1)
+          : result.slice(0, at) + letter + result.slice(at);
+  }
+  return result;
+}
+
+describe("levenshteinWithin", () => {
+  it("is the exact distance within the bound and bound + 1 past it", () => {
+    const random = mulberry32(1);
+    for (let run = 0; run < 5000; run++) {
+      const a = randomSlug(random);
+      const b = random() < 0.5 ? mutate(random, a) : randomSlug(random);
+      const bound = Math.floor(random() * 12);
+      const distance = levenshteinDistance(a, b);
+
+      expect(levenshteinWithin(a, b, bound)).toBe(
+        distance <= bound ? distance : bound + 1,
+      );
+    }
+  });
+
+  it("handles empty strings and strings longer than its buffers", () => {
+    const long = "ab".repeat(200);
+
+    expect(levenshteinWithin("", "abc", 3)).toBe(3);
+    expect(levenshteinWithin("", "abc", 2)).toBe(3);
+    expect(levenshteinWithin(long, `${long}x`, 1)).toBe(1);
+    expect(levenshteinWithin(long, long.replace("a", "b"), 0)).toBe(1);
+  });
+});
+
+describe("titleSimilarityAtLeast", () => {
+  it.each([
+    SUGGEST_SCORE,
+    AUTO_MERGE_SCORE,
+    0.5,
+  ])("answers exactly what titleSimilarity does, at a floor of %d", (floor) => {
+    const random = mulberry32(Math.round(floor * 100));
+    for (let run = 0; run < 5000; run++) {
+      const a = randomSlug(random);
+      const b = random() < 0.6 ? mutate(random, a) : randomSlug(random);
+      const full = titleSimilarity(a, b);
+
+      expect(titleSimilarityAtLeast(a, b, floor)).toEqual(
+        full.score >= floor ? full : null,
+      );
+    }
+  });
+});
 
 describe("levenshteinDistance", () => {
   it("computes known distances", () => {

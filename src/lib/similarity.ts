@@ -42,6 +42,93 @@ export function levenshteinSimilarity(a: string, b: string): number {
   return 1 - levenshteinDistance(a, b) / maxLength;
 }
 
+// Reused by every bounded call: /duplicates makes millions of them in a large
+// library, and two fresh arrays per call were most of what each one cost.
+let previousRow = new Int32Array(128);
+let currentRow = new Int32Array(128);
+
+/**
+ * levenshteinDistance(a, b) when it is at most `bound`, and `bound + 1` when
+ * it is more. Only the diagonal band a distance within the bound can run
+ * through is filled, and the walk stops at the first row that is entirely past
+ * it (Ukkonen) — which, for two unrelated titles, is a few rows in.
+ */
+export function levenshteinWithin(a: string, b: string, bound: number): number {
+  const over = bound + 1;
+  if (Math.abs(a.length - b.length) > bound) {
+    return over;
+  }
+  if (a === b) {
+    return 0;
+  }
+  if (a.length === 0 || b.length === 0) {
+    return Math.max(a.length, b.length);
+  }
+  const width = b.length + 1;
+  if (previousRow.length < width) {
+    previousRow = new Int32Array(width * 2);
+    currentRow = new Int32Array(width * 2);
+  }
+  let previous = previousRow;
+  let current = currentRow;
+  for (let j = 0; j < width; j++) {
+    previous[j] = j <= bound ? j : over;
+  }
+  for (let i = 1; i <= a.length; i++) {
+    const low = Math.max(1, i - bound);
+    const high = Math.min(b.length, i + bound);
+    // Outside the band a cell is already past the bound; `over` stands in.
+    current[low - 1] = low === 1 ? Math.min(i, over) : over;
+    let rowMinimum = current[low - 1] as number;
+    const letter = a.charCodeAt(i - 1);
+    for (let j = low; j <= high; j++) {
+      let value =
+        (previous[j - 1] as number) + (letter === b.charCodeAt(j - 1) ? 0 : 1);
+      const deletion = (previous[j] as number) + 1;
+      if (deletion < value) {
+        value = deletion;
+      }
+      const insertion = (current[j - 1] as number) + 1;
+      if (insertion < value) {
+        value = insertion;
+      }
+      current[j] = value > over ? over : value;
+      if (value < rowMinimum) {
+        rowMinimum = value;
+      }
+    }
+    if (high < b.length) {
+      current[high + 1] = over;
+    }
+    if (rowMinimum > bound) {
+      return over;
+    }
+    [previous, current] = [current, previous];
+  }
+  const distance = previous[b.length] as number;
+  return distance > bound ? over : distance;
+}
+
+/**
+ * levenshteinSimilarity(a, b) when it is at least `floor`, and -1 when it is
+ * not. The bound is the largest distance whose similarity can still reach the
+ * floor, rounded up, so floating point can only make it more generous; the
+ * comparison itself is the same formula on the same exact distance.
+ */
+function similarityAtLeast(a: string, b: string, floor: number): number {
+  if (a === b) {
+    return 1;
+  }
+  const maxLength = Math.max(a.length, b.length);
+  const bound = Math.ceil((1 - floor) * maxLength);
+  const distance = levenshteinWithin(a, b, bound);
+  if (distance > bound) {
+    return -1;
+  }
+  const similarity = 1 - distance / maxLength;
+  return similarity >= floor ? similarity : -1;
+}
+
 /** Why a pair scored the way it did — the dashboard shows this verbatim. */
 export type TitleMatchReason = "tokens" | "edit-distance" | "containment";
 
@@ -139,25 +226,56 @@ interface TokenPair {
  * does not depend on which slug was passed first.
  */
 export function titleSimilarity(slugA: string, slugB: string): TitleMatch {
-  const editScore = levenshteinSimilarity(slugA, slugB);
+  // A floor of zero is never missed, so this always answers.
+  return matchTitles(slugA, slugB, 0) as TitleMatch;
+}
+
+/**
+ * titleSimilarity(slugA, slugB) when its score is at least `floor`, and null
+ * when it is not: the same answer, without the work a pair that cannot reach
+ * the floor would otherwise cost. That is nearly every pair /duplicates scores
+ * — two unrelated titles that happen to share a word — and the whole-string
+ * edit distance was most of the time each took.
+ */
+export function titleSimilarityAtLeast(
+  slugA: string,
+  slugB: string,
+  floor: number,
+): TitleMatch | null {
+  return matchTitles(slugA, slugB, floor);
+}
+
+function matchTitles(
+  slugA: string,
+  slugB: string,
+  floor: number,
+): TitleMatch | null {
   if (slugA === slugB) {
     return { score: 1, reasons: ["tokens"], sequelSuspicion: false };
   }
+  /** The exact edit score once the token score has fallen short of the floor. */
+  const editScoreAtLeastFloor = () =>
+    floor <= 0
+      ? levenshteinSimilarity(slugA, slugB)
+      : similarityAtLeast(slugA, slugB, floor);
 
   const tokensA = tokenize(slugA);
   const tokensB = tokenize(slugB);
   if (tokensA.length === 0 || tokensB.length === 0) {
-    return {
-      score: editScore,
-      reasons: ["edit-distance"],
-      sequelSuspicion: false,
-    };
+    const editScore = editScoreAtLeastFloor();
+    return editScore >= floor
+      ? { score: editScore, reasons: ["edit-distance"], sequelSuspicion: false }
+      : null;
   }
 
   const candidates: TokenPair[] = [];
   for (let i = 0; i < tokensA.length; i++) {
     for (let j = 0; j < tokensB.length; j++) {
-      const similarity = levenshteinSimilarity(tokensA[i], tokensB[j]);
+      const similarity = similarityAtLeast(
+        tokensA[i],
+        tokensB[j],
+        TOKEN_MATCH_THRESHOLD,
+      );
       if (similarity >= TOKEN_MATCH_THRESHOLD) {
         const [first, second] = [tokensA[i], tokensB[j]].toSorted();
         candidates.push({
@@ -193,6 +311,16 @@ export function titleSimilarity(slugA: string, slugB: string): TitleMatch {
 
   const totalWeight = weightOf(tokensA) + weightOf(tokensB);
   const tokenScore = (2 * matchedWeight) / totalWeight;
+  // Past the floor on tokens alone, the edit score only decides the reason
+  // and whether it raises the score, so it is taken in full; short of it, it
+  // only matters if it reaches the floor itself.
+  const editScore =
+    tokenScore >= floor
+      ? levenshteinSimilarity(slugA, slugB)
+      : editScoreAtLeastFloor();
+  if (Math.max(tokenScore, editScore) < floor) {
+    return null;
+  }
 
   const unmatched = [
     ...tokensA.filter((_, i) => !takenA.has(i)),

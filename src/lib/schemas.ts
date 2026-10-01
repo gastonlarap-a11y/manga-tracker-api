@@ -58,26 +58,38 @@ export function statusFromDb(raw: string): MangaStatus {
   return parsed.success ? parsed.data : "reading";
 }
 
-// Structurally-typed params keep lib free of imports from src/generated.
-export function toMangaDto(manga: {
+interface MangaDtoFields {
   id: string;
   canonicalName: string;
   normalizedSlug: string;
   coverUrl: string | null;
-  coverImage: Uint8Array | null;
   coverVersion: number;
   status: string;
   tags: string;
   createdAt: Date;
   mergedIntoSlug: string | null;
-}): MangaDto {
+}
+
+/**
+ * A manga row read with its cover bytes, or read without them and told
+ * whether there are any — which is how every list reads it now, since those
+ * bytes are a cover's worth of data per row.
+ */
+export type MangaDtoSource = MangaDtoFields &
+  ({ coverImage: Uint8Array | null } | { hasStoredCover: boolean });
+
+// Structurally-typed params keep lib free of imports from src/generated.
+export function toMangaDto(manga: MangaDtoSource): MangaDto {
   return {
     id: manga.id,
     canonicalName: manga.canonicalName,
     normalizedSlug: manga.normalizedSlug,
     coverUrl: manga.coverUrl,
     coverVersion: manga.coverVersion,
-    hasStoredCover: manga.coverImage !== null,
+    hasStoredCover:
+      "hasStoredCover" in manga
+        ? manga.hasStoredCover
+        : manga.coverImage !== null,
     status: statusFromDb(manga.status),
     tags: tagsFromJson(manga.tags),
     createdAt: manga.createdAt.toISOString(),

@@ -6,7 +6,11 @@ import {
   parseChapterNumber,
   seriesKeyFromUrl,
 } from "../../lib/normalize";
-import { isConfidentMatch, titleSimilarity } from "../../lib/similarity";
+import {
+  AUTO_MERGE_SCORE,
+  isConfidentMatch,
+  titleSimilarityAtLeast,
+} from "../../lib/similarity";
 import { publishLibraryChanged } from "./events.bus";
 
 export interface RecordReadingEventInput {
@@ -267,8 +271,16 @@ function findConfidentCanonical(
       continue;
     }
     for (const member of [group.canonical, ...group.aliases]) {
-      const match = titleSimilarity(normalizedSlug, member.normalizedSlug);
+      // Below the auto-merge score a match is never confident, so the bounded
+      // scorer answers the same question for the whole library at a fraction
+      // of the cost.
+      const match = titleSimilarityAtLeast(
+        normalizedSlug,
+        member.normalizedSlug,
+        AUTO_MERGE_SCORE,
+      );
       if (
+        match !== null &&
         isConfidentMatch(match) &&
         (best === null || match.score > best.score)
       ) {

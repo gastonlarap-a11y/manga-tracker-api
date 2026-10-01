@@ -21,9 +21,23 @@ export function isTimeZone(timeZone: string): boolean {
 }
 
 /**
+ * The width of a stretch of time inside which no zone's calendar day changes.
+ * Every zone in use today is offset from UTC by a multiple of fifteen minutes
+ * (India's :30, Nepal's :45, Chatham's 12:45), and changes offset at a local
+ * wall-clock time, so a local midnight — or a transition — always falls on a
+ * quarter hour of UTC. Only the local mean times of the nineteenth century
+ * break that, and nobody read a chapter then.
+ */
+const DAY_CONSTANT_MS = 15 * 60_000;
+
+/**
  * The function that answers which calendar day an instant falls on in
  * `timeZone`. Returned rather than computed in one call, because building the
  * formatter is the expensive part and a caller asks it once per reading.
+ *
+ * It remembers each quarter hour it has answered: twelve weeks of a heavy
+ * reader are tens of thousands of readings, and formatting each one was a
+ * large part of what the activity panel cost.
  */
 export function calendarDayIn(timeZone: string): (instant: Date) => string {
   const format = new Intl.DateTimeFormat("en-US", {
@@ -32,13 +46,21 @@ export function calendarDayIn(timeZone: string): (instant: Date) => string {
     month: "2-digit",
     day: "2-digit",
   });
+  const answered = new Map<number, string>();
   return (instant) => {
+    const quarter = Math.floor(instant.getTime() / DAY_CONSTANT_MS);
+    const known = answered.get(quarter);
+    if (known !== undefined) {
+      return known;
+    }
     // Assembled from the parts rather than trusting one locale's layout to
     // stay `YYYY-MM-DD` across ICU versions.
     const parts = new Map(
       format.formatToParts(instant).map((part) => [part.type, part.value]),
     );
-    return `${parts.get("year")}-${parts.get("month")}-${parts.get("day")}`;
+    const day = `${parts.get("year")}-${parts.get("month")}-${parts.get("day")}`;
+    answered.set(quarter, day);
+    return day;
   };
 }
 
