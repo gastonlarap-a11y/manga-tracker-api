@@ -15,7 +15,8 @@ the user owns, off unless configured.
   in the library module because duplicates reads it too
 - `src/modules/<feature>/` — one vertical slice: `*.routes.ts` + `*.service.ts` + `*.test.ts`
   (plus extra colocated units when needed, e.g. `events/events.bus.ts`)
-- `src/modules/sync/` — optional two-way sync with Azure DocumentDB (`sync.target.ts` is the ONLY
+- `src/modules/sync/` — optional two-way sync with a MongoDB store — MongoDB Atlas since
+  2026-08-31, Azure DocumentDB before, wire-compatible either way (`sync.target.ts` is the ONLY
   file allowed to import `mongodb`; `sync.mapper.ts` is pure and driver-free)
 - `runtime/` — the manifest and lockfile the shipped tree installs its native driver from
 - `scripts/` — operator tools run by hand: `sync:inspect` (what the shared store holds),
@@ -308,7 +309,7 @@ the user owns, off unless configured.
   notifications.
 - Only `src/config.ts` reads env vars; everything else receives values from it
   (`DATABASE_URL`, `PORT`, and the optional `MONGODB_URL` / `MONGODB_DB`).
-- Azure DocumentDB is a **shared store several machines converge on**, never a read path: SQLite
+- The MongoDB store is a **shared store several machines converge on**, never a read path: SQLite
   answers every request, and a sync only runs on the scheduler's triggers. Never make a request
   handler read from it — that would make the library depend on connectivity.
 - Convergence rules, and why they are not negotiable:
