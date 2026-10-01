@@ -276,35 +276,52 @@ function corpusAtScale(
   };
 }
 
+/**
+ * Ten thousand titles are heavy on purpose, and a CI runner is several times
+ * slower than a laptop (10 s on GitHub's macOS where a local run takes 1.6):
+ * the default 5 s timeout would measure the runner, not the code. How fast the
+ * blocking itself is, is what the second test asserts.
+ */
+const AT_SCALE_TIMEOUT_MS = 60_000;
+
 describe("candidatePairs at scale", () => {
-  it("never loses a title's variant, with the frequency cap in play", () => {
-    const { candidates, planted } = corpusAtScale(10_000, 11);
-    const kept = new Set(
-      candidatePairs(candidates).map(([i, j]) => `${i}:${j}`),
-    );
+  it(
+    "never loses a title's variant, with the frequency cap in play",
+    () => {
+      const { candidates, planted } = corpusAtScale(10_000, 11);
+      const kept = new Set(
+        candidatePairs(candidates).map(([i, j]) => `${i}:${j}`),
+      );
 
-    const missed = planted
-      .filter(([i, j]) =>
-        isPair(candidates[i] as Candidate, candidates[j] as Candidate),
-      )
-      .filter(([i, j]) => !kept.has(`${i}:${j}`))
-      .map(([i, j]) => `${candidates[i]?.slug} ~ ${candidates[j]?.slug}`);
+      const missed = planted
+        .filter(([i, j]) =>
+          isPair(candidates[i] as Candidate, candidates[j] as Candidate),
+        )
+        .filter(([i, j]) => !kept.has(`${i}:${j}`))
+        .map(([i, j]) => `${candidates[i]?.slug} ~ ${candidates[j]?.slug}`);
 
-    expect(planted.length).toBeGreaterThan(1000);
-    expect(missed).toEqual([]);
-  });
+      expect(planted.length).toBeGreaterThan(1000);
+      expect(missed).toEqual([]);
+    },
+    AT_SCALE_TIMEOUT_MS,
+  );
 
-  it("keeps the work near-linear: ten thousand titles in well under a second", () => {
-    const { candidates } = corpusAtScale(10_000, 12);
+  it(
+    "keeps the work near-linear: ten thousand titles in seconds, not hours",
+    () => {
+      const { candidates } = corpusAtScale(10_000, 12);
 
-    const start = performance.now();
-    const pairs = candidatePairs(candidates);
-    const elapsed = performance.now() - start;
+      const start = performance.now();
+      const pairs = candidatePairs(candidates);
+      const elapsed = performance.now() - start;
 
-    // A full comparison would be 50 million pairs.
-    expect(pairs.length).toBeLessThan(2_000_000);
-    expect(elapsed).toBeLessThan(5_000);
-  });
+      // A full comparison would be 50 million pairs. Under a second on a
+      // laptop; the bound leaves room for a slow runner, not for quadratic work.
+      expect(pairs.length).toBeLessThan(2_000_000);
+      expect(elapsed).toBeLessThan(5_000);
+    },
+    AT_SCALE_TIMEOUT_MS,
+  );
 });
 
 describe("blockingKeys", () => {
