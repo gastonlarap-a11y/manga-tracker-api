@@ -1,5 +1,6 @@
 import { prisma } from "../../db/client";
 import type { Manga, ReadingEvent } from "../../generated/prisma/client";
+import { calendarDayIn, daysEndingOn } from "../../lib/calendar-day";
 import {
   type MangaGroup,
   resolveCanonical,
@@ -114,6 +115,60 @@ function matchesFilters(
     return false;
   }
   return true;
+}
+
+export interface ActivityQuery {
+  days: number;
+  timeZone: string;
+  now?: Date;
+}
+
+export interface ActivityDay {
+  /** Calendar day in the query's time zone, `YYYY-MM-DD`. */
+  date: string;
+  chapters: number;
+}
+
+/**
+ * Chapters read per calendar day over the last `days` days, oldest first, with
+ * every day present — a day nothing was read on is a zero, not a gap, so the
+ * dashboard draws the series without having to know the calendar.
+ *
+ * Counted the way `readCount` counts: distinct chapters per card. A chapter
+ * read that day on two sites merged into one card is one chapter, not two.
+ * Readings of a deleted card are not counted, as the card is not shown.
+ */
+export async function getActivity({
+  days,
+  timeZone,
+  now = new Date(),
+}: ActivityQuery): Promise<ActivityDay[]> {
+  const dayOf = calendarDayIn(timeZone);
+  const window = daysEndingOn(dayOf(now), days);
+  const read = new Map(window.map((day) => [day, new Set<string>()]));
+  // Every instant before this falls before the window's first day, whatever the
+  // zone and however long a DST day is, so the newest-first scan can stop
+  // there. Anything after it is placed by its day, and dropped if outside.
+  const earliest = now.getTime() - (days + 1) * 86_400_000;
+
+  for (const group of await loadGroups()) {
+    if (group.canonical.deletedAt !== null) {
+      continue;
+    }
+    for (const event of groupEvents(group)) {
+      if (event.readAt.getTime() < earliest) {
+        break; // groupEvents is newest first: the rest are older still.
+      }
+      read
+        .get(dayOf(event.readAt))
+        ?.add(`${group.canonical.id}:${chapterKey(event)}`);
+    }
+  }
+
+  return window.map((date) => ({
+    date,
+    chapters: read.get(date)?.size ?? 0,
+  }));
 }
 
 /**
