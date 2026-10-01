@@ -125,10 +125,13 @@ the user owns, off unless configured.
   and writes it back through `plutil -convert xml1 -o <path> -` on stdin — `plutil -replace
   -string <value>` put the value (the password, on the fallback path) on argv. No secret
   reaches a command line anywhere in `deploy/` now; keep it that way.
-- **`frame-ancestors` is Report-Only** (`src/modules/embedding/`): the allowlist of the desktop
-  app's origins plus a `'none'` control, both reporting to `/api/csp-report` and logged as
-  `[csp] …`. Enforce the allowlist only once a real app on each platform has produced control
-  reports and no allowlist report — guessed wrong, it blanks the dashboard inside the app.
+- **`frame-ancestors` is enforced per platform, only once measured** (`src/modules/embedding/`,
+  `MEASURED_PLATFORMS`). Unmeasured, a dashboard page carries the allowlist of the desktop app's
+  origins plus a `'none'` control, both Report-Only to `/api/csp-report` and logged as
+  `[csp] …`. A platform joins the set only after a real app window there has produced a control
+  report and no allowlist report — guessed wrong, it blanks the dashboard inside the app.
+  macOS joined on 2026-10-01 (WKWebView, v0.1.15); Windows has not reported yet. Enforced, the
+  allowlist keeps reporting as `policy=enforced`, the only trace a blank window would leave.
 - **`"keystore"` in the configuration is a pointer, not a value.** Every reader outside the
   launcher goes through `credentialIn` (`deploy/lib/sync-secret.ts`); read as the credential,
   `env:pull --prod` cached the word over the Keychain and `env:push` uploaded it to Key Vault.

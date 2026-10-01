@@ -11,7 +11,7 @@ import { adaptersRoutes } from "./modules/adapters/adapters.routes";
 import { duplicatesRoutes } from "./modules/duplicates/duplicates.routes";
 import {
   embeddingRoutes,
-  reportFrameAncestors,
+  frameAncestors,
 } from "./modules/embedding/embedding.routes";
 import { eventsRoutes } from "./modules/events/events.routes";
 import { healthRoutes } from "./modules/health/health.routes";
@@ -63,12 +63,14 @@ startSyncScheduler();
 // deployed these paths just 404.
 app.use("/assets/*", serveStatic({ root: "./public" }));
 app.get("/favicon.svg", serveStatic({ path: "./public/favicon.svg" }));
-// The dashboard pages carry the frame-ancestors policies, Report-Only for now;
-// src/modules/embedding says why, and where the reports land.
+// The dashboard pages carry the frame-ancestors policy: enforced on the
+// platforms it was measured on, Report-Only elsewhere. src/modules/embedding
+// says why, and where the reports land.
+const dashboardFramePolicy = frameAncestors();
 for (const spaPath of ["/", "/manga/:id", "/duplicates"]) {
   app.get(
     spaPath,
-    reportFrameAncestors,
+    dashboardFramePolicy,
     serveStatic({ path: "./public/index.html" }),
   );
 }
