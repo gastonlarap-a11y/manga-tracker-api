@@ -578,7 +578,8 @@ Decisiones que quedaron fijadas al implementarla:
 - **No se migró a Mongo.** Prisma 7 no soporta MongoDB (la doc oficial manda 6.19), y migrar
   habría implicado degradar Prisma o reescribir los 4 services y el arnés de tests, sin ningún
   problema de escala que lo justifique.
-- **`mongodb` fijado en `^6`**: el 7.x trae `bson@7`, que revienta bajo Bun.
+- **`mongodb` estuvo fijado en `^6`** porque el 7.x trae `bson@7`, que reventaba bajo Bun 1.3.
+  Desde Bun 1.4 (que implementa lo que faltaba) el driver es 7.x; los dos se mueven juntos.
 - **Borrados con doble candado**: base local vacía no pushea, y el push de arranque es aditivo.
 
 ## Consideraciones de largo plazo

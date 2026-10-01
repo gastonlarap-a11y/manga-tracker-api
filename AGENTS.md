@@ -90,9 +90,11 @@ the user owns, off unless configured.
   LF, so a CRLF checkout on Windows (`core.autocrlf=true`) fails `bun run lint` on every file
   in the repo — it reports 67 errors that are not lint errors at all. Never relax the rule to
   `crlf`: that would fail the same way on macOS and in CI.
-- `mongodb` is pinned to `^6`: the 7.x line ships `bson@7`, which calls `node:v8`
-  `isBuildingSnapshot` at import time and crashes under Bun. Do not bump it without re-running
-  the connectivity check.
+- **`mongodb` 7 and Bun 1.4 move together.** The 7.x line ships `bson@7`, which calls `node:v8`
+  `isBuildingSnapshot` at import time; Bun implements it from 1.4.0 (oven-sh/bun#32502), and on
+  1.3.x the import itself throws. So the CI's `bun-version`, the desktop's `sources.json` and a
+  developer's local Bun must all be ≥ 1.4 — and a driver bump still re-runs the connectivity
+  check (`bun run sync:inspect` against the real cluster), which tests cannot stand in for.
 - Sync must never break a local write: failures are logged and surfaced through
   `GET /api/sync/status`, never propagated into a request handler.
 - A new environment variable is declared in `deploy/lib/env.ts` (`ENV_MANIFEST`) as `secret`,
