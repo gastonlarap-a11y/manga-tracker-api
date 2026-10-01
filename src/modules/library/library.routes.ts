@@ -16,7 +16,10 @@ import {
   fetchMangaCover,
   getActivity,
   getLibrary,
+  getLibraryPage,
+  getLibrarySummary,
   getMangaHistory,
+  type LibraryProjection,
   MAX_COVER_IMAGE_BYTES,
   storeMangaCoverImage,
   updateManga,
@@ -72,6 +75,61 @@ const libraryQuerySchema = z
     since: z.iso.datetime().optional(),
   })
   .openapi("LibraryQuery");
+
+export const libraryPageSchema = z
+  .object({
+    items: z.array(libraryEntrySchema),
+    // Opaque; pass it back as `cursor` for the next page. Null on the last.
+    nextCursor: z.string().nullable(),
+  })
+  .openapi("LibraryPage");
+
+const libraryPageQuerySchema = z
+  .object({
+    sort: z.enum(["recent", "title", "chapters"]).default("recent"),
+    // A grid's worth or two; 200 bounds what one request can make the
+    // database read, whatever the size of the library.
+    limit: z.coerce.number().int().min(1).max(200).default(60),
+    cursor: z.string().max(512).optional(),
+    status: mangaStatusSchema.optional(),
+    q: z.string().max(200).optional(),
+    domain: z.string().optional(),
+    since: z.iso.datetime().optional(),
+    // Comma-separated; a card must carry every one of them.
+    tags: z.string().max(1000).optional(),
+  })
+  .openapi("LibraryPageQuery");
+
+export const librarySummarySchema = z
+  .object({
+    counts: z.object({
+      reading: z.number().int(),
+      completed: z.number().int(),
+      dropped: z.number().int(),
+      all: z.number().int(),
+    }),
+    chapters: z.number().int(),
+    sites: z.number().int(),
+    activeThisWeek: z.number().int(),
+    domains: z.array(z.string()),
+    tags: z.array(z.string()),
+  })
+  .openapi("LibrarySummary");
+
+/** A card as the API returns it. */
+function toEntryDto(entry: LibraryProjection) {
+  return {
+    ...entry,
+    status: statusFromDb(entry.status),
+    tags: tagsFromJson(entry.tags),
+    lastActivity: entry.lastActivity
+      ? {
+          readAt: entry.lastActivity.readAt.toISOString(),
+          chapterLabel: entry.lastActivity.chapterLabel,
+        }
+      : null,
+  };
+}
 
 export const libraryActivitySchema = z
   .object({
@@ -156,6 +214,37 @@ const getActivityRoute = createRoute({
   },
 });
 
+const getLibraryPageRoute = createRoute({
+  method: "get",
+  path: "/library/page",
+  tags: ["library"],
+  request: { query: libraryPageQuerySchema },
+  responses: {
+    200: {
+      description:
+        "One page of cards, filtered, searched and ordered by the server",
+      content: { "application/json": { schema: libraryPageSchema } },
+    },
+    400: {
+      description: "Invalid query",
+      content: { "application/json": { schema: errorSchema } },
+    },
+  },
+});
+
+const getLibrarySummaryRoute = createRoute({
+  method: "get",
+  path: "/library/summary",
+  tags: ["library"],
+  responses: {
+    200: {
+      description:
+        "Totals for the stats, the counts per status and the filter options",
+      content: { "application/json": { schema: librarySummarySchema } },
+    },
+  },
+});
+
 const getHistoryRoute = createRoute({
   method: "get",
   path: "/mangas/{id}/history",
@@ -179,7 +268,7 @@ const putMangaRoute = createRoute({
   tags: ["library"],
   request: {
     params: mangaParamsSchema,
-    // Required so a non-JSON body is a 400, not {} and a 500: see events.routes.ts.
+    // Required so a non-JSON body is refused, not {} and a 500: see events.routes.ts.
     body: {
       required: true,
       content: { "application/json": { schema: updateMangaBodySchema } },
@@ -285,21 +374,31 @@ export const libraryRoutes = new OpenAPIHono({ defaultHook })
       domain: query.domain,
       since: query.since ? new Date(query.since) : undefined,
     });
+    return c.json(entries.map(toEntryDto), 200);
+  })
+  .openapi(getLibraryPageRoute, async (c) => {
+    const query = c.req.valid("query");
+    const page = await getLibraryPage({
+      sort: query.sort,
+      limit: query.limit,
+      cursor: query.cursor,
+      status: query.status,
+      q: query.q,
+      domain: query.domain,
+      since: query.since ? new Date(query.since) : undefined,
+      tags: query.tags
+        ?.split(",")
+        .map((tag) => tag.trim())
+        .filter((tag) => tag.length > 0),
+    });
     return c.json(
-      entries.map((entry) => ({
-        ...entry,
-        status: statusFromDb(entry.status),
-        tags: tagsFromJson(entry.tags),
-        lastActivity: entry.lastActivity
-          ? {
-              readAt: entry.lastActivity.readAt.toISOString(),
-              chapterLabel: entry.lastActivity.chapterLabel,
-            }
-          : null,
-      })),
+      { items: page.items.map(toEntryDto), nextCursor: page.nextCursor },
       200,
     );
   })
+  .openapi(getLibrarySummaryRoute, async (c) =>
+    c.json(await getLibrarySummary(), 200),
+  )
   .openapi(getActivityRoute, async (c) => {
     const query = c.req.valid("query");
     const timeZone =
@@ -360,9 +459,14 @@ export const libraryRoutes = new OpenAPIHono({ defaultHook })
     }
     return c.body(cover.body, 200, {
       "Content-Type": cover.contentType,
-      // The dashboard busts this with a ?v= derived from coverUrl, so a long
-      // browser cache is safe even when the user changes the cover.
-      "Cache-Control": "public, max-age=86400",
+      // The dashboard asks with a ?v= derived from the cover's url and
+      // version, so that url names these exact bytes for good: immutable, and
+      // a grid scrolled back into view is never revalidated. Without one (the
+      // extension's requests) a day is still the most a stale cover can live.
+      "Cache-Control":
+        c.req.query("v") !== undefined
+          ? "public, max-age=31536000, immutable"
+          : "public, max-age=86400",
     });
   })
   .openapi(deleteMangaRoute, async (c) => {

@@ -116,16 +116,18 @@ describe("POST /events", () => {
     expect(errorSchema.parse(await res.json()).error).toContain("readAt");
   });
 
-  it("refuses a body that is not JSON with a 400, not a crash", async () => {
+  it("refuses a body that is not JSON as unsupported, not as a crash", async () => {
     // Optional, the body was skipped for another Content-Type and the handler
-    // got {}, which it could only answer with a 500.
+    // got {}, which it could only answer with a 500. zod-openapi refuses the
+    // media type itself now; the app's errorHandler gives it the { error }
+    // shape (see lib/http.test.ts).
     const res = await eventsRoutes.request("/events", {
       method: "POST",
       headers: { "content-type": "text/plain" },
       body: "mangaName=Vagabond",
     });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(415);
   });
 
   it("deduplicates mangas by normalized slug", async () => {

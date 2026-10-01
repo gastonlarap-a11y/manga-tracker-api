@@ -1,20 +1,25 @@
 import { prisma } from "../../db/client";
-import type { Manga, ReadingEvent } from "../../generated/prisma/client";
-import { calendarDayIn, daysEndingOn } from "../../lib/calendar-day";
 import {
-  type MangaGroup,
-  resolveCanonical,
-  resolveMangaGroups,
-} from "../../lib/manga-groups";
+  inChunks,
+  NEVER_READ,
+  refreshProjection,
+  storedCoverIds,
+} from "../../db/library-projection";
+import type {
+  LibraryEntry,
+  Manga,
+  Prisma,
+  ReadingEvent,
+} from "../../generated/prisma/client";
+import { calendarDayIn, daysEndingOn } from "../../lib/calendar-day";
 import { chapterKey } from "../../lib/normalize";
+import { searchKeyOf } from "../../lib/search-key";
 import { publishLibraryChanged } from "../events/events.bus";
 
 export interface LibraryFilters {
   domain?: string;
   since?: Date;
 }
-
-type MangaWithEvents = Manga & { events: ReadingEvent[] };
 
 export interface LibraryProjection {
   id: string;
@@ -45,76 +50,286 @@ export interface UpdateMangaInput {
   coverUrl?: string | null;
 }
 
-/**
- * Loads every manga with its events and collapses merged ones into groups.
- *
- * Soft-deleted rows are NOT filtered in SQL: an alias the user had deleted
- * before merging still contributes its readings to the series, and deciding
- * visibility is the canonical's job (a card exists iff its canonical is alive).
- * Filtering by deletedAt in the query would silently drop those events.
- */
-async function loadGroups(): Promise<MangaGroup<MangaWithEvents>[]> {
-  const mangas = await prisma.manga.findMany({
-    include: { events: { orderBy: { readAt: "desc" } } },
-    orderBy: { createdAt: "asc" },
-  });
-  return resolveMangaGroups(mangas);
+/** A card as the routes render it, from its row in the read model. */
+function toProjection(entry: LibraryEntry): LibraryProjection {
+  return {
+    id: entry.mangaId,
+    canonicalName: entry.canonicalName,
+    normalizedSlug: entry.normalizedSlug,
+    coverUrl: entry.coverUrl,
+    coverVersion: entry.coverVersion,
+    hasStoredCover: entry.hasStoredCover,
+    status: entry.status,
+    tags: entry.tags,
+    reachedChapter:
+      entry.reachedNumber !== null && entry.reachedLabel !== null
+        ? { number: entry.reachedNumber, label: entry.reachedLabel }
+        : null,
+    lastActivity:
+      entry.lastReadAt.getTime() > NEVER_READ.getTime() &&
+      entry.lastChapterLabel !== null
+        ? { readAt: entry.lastReadAt, chapterLabel: entry.lastChapterLabel }
+        : null,
+    lastSourceUrl: entry.lastSourceUrl,
+    readCount: entry.readCount,
+    // Cast justified: written by projectEntry as a JSON array of strings.
+    sourceDomains: JSON.parse(entry.sourceDomains) as string[],
+    aliasCount: entry.aliasCount,
+  };
 }
 
-/** Every event of the group, most recent first. Nothing is deduplicated here. */
-function groupEvents(group: MangaGroup<MangaWithEvents>): ReadingEvent[] {
-  return [group.canonical, ...group.aliases]
-    .flatMap((manga) => manga.events)
-    .sort((a, b) => b.readAt.getTime() - a.readAt.getTime());
+export type LibrarySort = "recent" | "title" | "chapters";
+
+export interface LibraryQuery extends LibraryFilters {
+  /** One status, or every card when absent. */
+  status?: string;
+  /** Matched against the title, accents and case ignored. */
+  q?: string;
+  /** Every one of these, not any. */
+  tags?: string[];
 }
 
+function whereFor(query: LibraryQuery): Prisma.LibraryEntryWhereInput {
+  const and: Prisma.LibraryEntryWhereInput[] = [];
+  if (query.domain !== undefined) {
+    and.push({ domains: { some: { domain: query.domain } } });
+  }
+  // A card read since then is one whose newest event is since then — which
+  // is what "has any event since" meant over the whole group.
+  if (query.since !== undefined) {
+    and.push({ lastReadAt: { gte: query.since } });
+  }
+  if (query.status !== undefined) {
+    and.push({ status: query.status });
+  }
+  const needle = query.q === undefined ? "" : searchKeyOf(query.q);
+  if (needle !== "") {
+    and.push({ searchKey: { contains: needle } });
+  }
+  for (const tag of query.tags ?? []) {
+    // Tags are stored as a JSON array; the quotes make "accion" match the tag
+    // and never a longer one that contains it.
+    and.push({ tags: { contains: JSON.stringify(tag) } });
+  }
+  return { AND: and };
+}
+
+const RECENT: Prisma.LibraryEntryOrderByWithRelationInput[] = [
+  { lastReadAt: "desc" },
+  { mangaId: "asc" },
+];
+
 /**
- * The library is a projection over the append-only event log:
- * - reachedChapter = the highest parsed chapter across the WHOLE history
- *   (real progress; a low-chapter event after a server change never lowers it)
- * - lastActivity = the most recent event, regardless of its chapter
- * Entries come back most-recently-read first (mangas without events last).
- * Volume is tiny (tens of events/day), so loading events per manga and
- * projecting in memory is simpler and strictly more correct than groupBy
- * (which cannot return the label of the max row).
+ * Every card, most recently read first (never-read ones last).
  *
- * One card per GROUP: a series read on two sites under two different titles is
- * one entry, whose history is the union of both. The filters are applied to the
- * group's events rather than pushed into SQL — a `where` on the manga row would
- * miss a canonical whose only matching reading belongs to one of its aliases.
+ * The whole library in one answer: what the browser extension asks for, and
+ * what it will go on asking for in the version already in people's browsers.
+ * The dashboard reads it a page at a time instead (getLibraryPage).
  */
 export async function getLibrary(
   filters: LibraryFilters,
 ): Promise<LibraryProjection[]> {
-  const groups = await loadGroups();
-
-  return groups
-    .filter((group) => group.canonical.deletedAt === null)
-    .map((group) => ({ group, events: groupEvents(group) }))
-    .filter(({ events }) => matchesFilters(events, filters))
-    .map(({ group, events }) => project(group, events))
-    .sort(
-      (a, b) =>
-        (b.lastActivity?.readAt.getTime() ?? 0) -
-        (a.lastActivity?.readAt.getTime() ?? 0),
-    );
+  await refreshProjection();
+  const entries = await prisma.libraryEntry.findMany({
+    where: whereFor(filters),
+    orderBy: RECENT,
+  });
+  return entries.map(toProjection);
 }
 
-function matchesFilters(
-  events: ReadingEvent[],
-  filters: LibraryFilters,
-): boolean {
-  if (
-    filters.domain !== undefined &&
-    !events.some((event) => event.sourceDomain === filters.domain)
-  ) {
-    return false;
+export interface LibraryPageQuery extends LibraryQuery {
+  sort: LibrarySort;
+  limit: number;
+  /** From the previous page's nextCursor; absent for the first page. */
+  cursor?: string;
+}
+
+export interface LibraryPage {
+  items: LibraryProjection[];
+  /** Null on the last page. */
+  nextCursor: string | null;
+}
+
+/**
+ * Where a page ended, by value rather than by row: a keyset cursor still
+ * points somewhere sensible after the card it was taken from changed or went
+ * away, which a cursor naming a row does not.
+ */
+interface PageCursor {
+  /** The sort key of the last card shown: ms for recent, text, or a count. */
+  k: number | string;
+  id: string;
+}
+
+function encodeCursor(cursor: PageCursor): string {
+  return Buffer.from(JSON.stringify(cursor)).toString("base64url");
+}
+
+/** The cursor, or null for one this server did not write. */
+export function decodeCursor(raw: string): PageCursor | null {
+  try {
+    const value: unknown = JSON.parse(
+      Buffer.from(raw, "base64url").toString("utf8"),
+    );
+    if (
+      typeof value === "object" &&
+      value !== null &&
+      "id" in value &&
+      "k" in value &&
+      typeof value.id === "string" &&
+      (typeof value.k === "number" || typeof value.k === "string")
+    ) {
+      return { k: value.k, id: value.id };
+    }
+    return null;
+  } catch {
+    return null;
   }
-  const since = filters.since;
-  if (since !== undefined && !events.some((event) => event.readAt >= since)) {
-    return false;
+}
+
+function afterCursor(
+  sort: LibrarySort,
+  cursor: PageCursor,
+): Prisma.LibraryEntryWhereInput {
+  const tie = { mangaId: { gt: cursor.id } };
+  switch (sort) {
+    case "recent": {
+      const at = new Date(Number(cursor.k));
+      return { OR: [{ lastReadAt: { lt: at } }, { lastReadAt: at, ...tie }] };
+    }
+    case "title": {
+      const key = String(cursor.k);
+      return { OR: [{ sortKey: { gt: key } }, { sortKey: key, ...tie }] };
+    }
+    case "chapters": {
+      const count = Number(cursor.k);
+      return {
+        OR: [{ readCount: { lt: count } }, { readCount: count, ...tie }],
+      };
+    }
   }
-  return true;
+}
+
+const ORDER: Record<
+  LibrarySort,
+  Prisma.LibraryEntryOrderByWithRelationInput[]
+> = {
+  recent: RECENT,
+  title: [{ sortKey: "asc" }, { mangaId: "asc" }],
+  chapters: [{ readCount: "desc" }, { mangaId: "asc" }],
+};
+
+function cursorOf(sort: LibrarySort, entry: LibraryEntry): PageCursor {
+  switch (sort) {
+    case "recent":
+      return { k: entry.lastReadAt.getTime(), id: entry.mangaId };
+    case "title":
+      return { k: entry.sortKey, id: entry.mangaId };
+    case "chapters":
+      return { k: entry.readCount, id: entry.mangaId };
+  }
+}
+
+/**
+ * One page of cards, filtered, searched and ordered by the database: the cost
+ * is the page, whatever the size of the library behind it.
+ */
+export async function getLibraryPage(
+  query: LibraryPageQuery,
+): Promise<LibraryPage> {
+  await refreshProjection();
+  const where = whereFor(query);
+  const cursor = query.cursor === undefined ? null : decodeCursor(query.cursor);
+  if (cursor !== null) {
+    where.AND = [
+      ...(Array.isArray(where.AND) ? where.AND : []),
+      afterCursor(query.sort, cursor),
+    ];
+  }
+  // One more than asked: whether it comes back says if there is a next page.
+  const rows = await prisma.libraryEntry.findMany({
+    where,
+    orderBy: ORDER[query.sort],
+    take: query.limit + 1,
+  });
+  const items = rows.slice(0, query.limit);
+  const last = items.at(-1);
+  return {
+    items: items.map(toProjection),
+    nextCursor:
+      rows.length > query.limit && last !== undefined
+        ? encodeCursor(cursorOf(query.sort, last))
+        : null,
+  };
+}
+
+export interface LibrarySummary {
+  counts: { reading: number; completed: number; dropped: number; all: number };
+  chapters: number;
+  sites: number;
+  activeThisWeek: number;
+  /** Every site any card was read on, for the filter. */
+  domains: string[];
+  /** Every tag in use, for the filter. */
+  tags: string[];
+}
+
+const WEEK_MS = 7 * 86_400_000;
+
+/**
+ * The library's totals — the stats tiles, the counts on the status tabs and
+ * the options of the filters — computed by the database over the read model,
+ * so the dashboard never needs every card to show them.
+ */
+export async function getLibrarySummary(
+  now: Date = new Date(),
+): Promise<LibrarySummary> {
+  await refreshProjection();
+  const [byStatus, sums, domains, activeThisWeek, tagged] = await Promise.all([
+    prisma.libraryEntry.groupBy({ by: ["status"], _count: { _all: true } }),
+    prisma.libraryEntry.aggregate({ _sum: { readCount: true } }),
+    // groupBy, not findMany's `distinct`: Prisma applies that one in memory,
+    // after reading a row per card and site — tens of thousands at scale —
+    // where GROUP BY is answered from the domain index.
+    prisma.libraryEntryDomain.groupBy({
+      by: ["domain"],
+      orderBy: { domain: "asc" },
+    }),
+    prisma.libraryEntry.count({
+      where: { lastReadAt: { gte: new Date(now.getTime() - WEEK_MS) } },
+    }),
+    prisma.libraryEntry.findMany({
+      where: { tags: { not: "[]" } },
+      select: { tags: true },
+    }),
+  ]);
+
+  const counts = { reading: 0, completed: 0, dropped: 0, all: 0 };
+  for (const row of byStatus) {
+    if (row.status === "completed" || row.status === "dropped") {
+      counts[row.status] += row._count._all;
+    } else {
+      // Anything unrecognised is shown as reading, as statusFromDb reads it.
+      counts.reading += row._count._all;
+    }
+    counts.all += row._count._all;
+  }
+  const tags = new Set<string>();
+  for (const row of tagged) {
+    // Cast justified: written by updateManga as JSON.stringify(string[]).
+    for (const tag of JSON.parse(row.tags) as string[]) {
+      tags.add(tag);
+    }
+  }
+
+  return {
+    counts,
+    chapters: sums._sum.readCount ?? 0,
+    sites: domains.length,
+    activeThisWeek,
+    domains: domains.map((row) => row.domain),
+    tags: [...tags].toSorted(),
+  };
 }
 
 export interface ActivityQuery {
@@ -137,31 +352,60 @@ export interface ActivityDay {
  * Counted the way `readCount` counts: distinct chapters per card. A chapter
  * read that day on two sites merged into one card is one chapter, not two.
  * Readings of a deleted card are not counted, as the card is not shown.
+ *
+ * Reads the window and nothing else (the readAt index), so it costs the days
+ * asked for, not the years of history behind them.
  */
 export async function getActivity({
   days,
   timeZone,
   now = new Date(),
 }: ActivityQuery): Promise<ActivityDay[]> {
+  await refreshProjection();
   const dayOf = calendarDayIn(timeZone);
   const window = daysEndingOn(dayOf(now), days);
   const read = new Map(window.map((day) => [day, new Set<string>()]));
   // Every instant before this falls before the window's first day, whatever the
-  // zone and however long a DST day is, so the newest-first scan can stop
-  // there. Anything after it is placed by its day, and dropped if outside.
-  const earliest = now.getTime() - (days + 1) * 86_400_000;
+  // zone and however long a DST day is. Anything after it is placed by its
+  // day, and dropped if outside.
+  const earliest = new Date(now.getTime() - (days + 1) * 86_400_000);
 
-  for (const group of await loadGroups()) {
-    if (group.canonical.deletedAt !== null) {
-      continue;
-    }
-    for (const event of groupEvents(group)) {
-      if (event.readAt.getTime() < earliest) {
-        break; // groupEvents is newest first: the rest are older still.
+  const events = await prisma.readingEvent.findMany({
+    where: { readAt: { gte: earliest } },
+    select: {
+      mangaId: true,
+      chapterNumber: true,
+      chapterLabel: true,
+      readAt: true,
+    },
+  });
+  if (events.length > 0) {
+    // Twelve weeks of a heavy reader touch thousands of series: more ids than
+    // one IN may carry.
+    const members = await inChunks(
+      [...new Set(events.map((e) => e.mangaId))],
+      (chunk) =>
+        prisma.libraryMember.findMany({ where: { memberId: { in: chunk } } }),
+    );
+    const canonicalOf = new Map(
+      members.map((member) => [member.memberId, member.canonicalId]),
+    );
+    const alive = new Set(
+      (
+        await inChunks([...new Set(canonicalOf.values())], (chunk) =>
+          prisma.libraryEntry.findMany({
+            where: { mangaId: { in: chunk } },
+            select: { mangaId: true },
+          }),
+        )
+      ).map((entry) => entry.mangaId),
+    );
+    for (const event of events) {
+      const canonical = canonicalOf.get(event.mangaId);
+      if (canonical === undefined || !alive.has(canonical)) {
+        continue;
       }
-      read
-        .get(dayOf(event.readAt))
-        ?.add(`${group.canonical.id}:${chapterKey(event)}`);
+      read.get(dayOf(event.readAt))?.add(`${canonical}:${chapterKey(event)}`);
     }
   }
 
@@ -171,40 +415,61 @@ export async function getActivity({
   }));
 }
 
+interface GroupRef {
+  canonicalId: string;
+  memberIds: string[];
+}
+
+/**
+ * The card an id belongs to — the canonical's or any alias's, so a link saved
+ * before a merge keeps working — with every member of it. Two indexed lookups
+ * in the read model, where it used to load the whole library to find one.
+ */
+async function loadGroupOf(id: string): Promise<GroupRef | null> {
+  await refreshProjection();
+  const member = await prisma.libraryMember.findUnique({
+    where: { memberId: id },
+  });
+  if (member === null) {
+    return null;
+  }
+  const members = await prisma.libraryMember.findMany({
+    where: { canonicalId: member.canonicalId },
+    select: { memberId: true },
+  });
+  return {
+    canonicalId: member.canonicalId,
+    memberIds: members.map((row) => row.memberId),
+  };
+}
+
+/** Whether the card is shown: its canonical is alive. */
+async function hasCard(canonicalId: string): Promise<boolean> {
+  const entry = await prisma.libraryEntry.findUnique({
+    where: { mangaId: canonicalId },
+    select: { mangaId: true },
+  });
+  return entry !== null;
+}
+
 /**
  * The row that owns the card this id belongs to. Every write below goes through
  * it, so editing, deleting or re-covering a series does the same thing whether
  * the caller holds the canonical's id or an alias's — a card is one entity, and
  * a link saved before a merge must not act on an invisible row.
- *
- * The fast path (nothing merged) costs exactly the same single query it did
- * before this feature existed.
  */
 async function loadCanonical(id: string): Promise<Manga | null> {
-  const manga = await prisma.manga.findUnique({ where: { id } });
-  if (manga === null || manga.mergedIntoSlug === null) {
-    return manga;
-  }
-  const identities = await prisma.manga.findMany({
-    select: { id: true, normalizedSlug: true, mergedIntoSlug: true },
-  });
-  const canonical = resolveCanonical(
-    {
-      id: manga.id,
-      normalizedSlug: manga.normalizedSlug,
-      mergedIntoSlug: manga.mergedIntoSlug,
-    },
-    new Map(identities.map((row) => [row.normalizedSlug, row])),
-  );
-  return canonical.id === manga.id
-    ? manga
-    : prisma.manga.findUnique({ where: { id: canonical.id } });
+  const group = await loadGroupOf(id);
+  return prisma.manga.findUnique({ where: { id: group?.canonicalId ?? id } });
 }
 
 export interface HistoryEvent extends ReadingEvent {
   /** Other domains where this same chapter was read, after a merge. */
   alsoReadOn: string[];
 }
+
+/** A manga row without its cover bytes, told whether it has any. */
+export type MangaRow = Omit<Manga, "coverImage"> & { hasStoredCover: boolean };
 
 /**
  * The history behind one card. Accepts the id of the canonical or of any alias
@@ -217,22 +482,39 @@ export interface HistoryEvent extends ReadingEvent {
  * it is the day the chapter was actually read for the first time.
  */
 export async function getMangaHistory(id: string): Promise<{
-  manga: Manga;
+  manga: MangaRow;
   /** The mangas merged into this one; the dashboard lists them to undo a merge. */
-  aliases: Manga[];
+  aliases: MangaRow[];
   events: HistoryEvent[];
 } | null> {
-  const groups = await loadGroups();
-  const group = groups.find((candidate) => candidate.memberIds.includes(id));
-  if (group === undefined || group.canonical.deletedAt !== null) {
+  const group = await loadGroupOf(id);
+  if (group === null || !(await hasCard(group.canonicalId))) {
     return null;
   }
-
-  const { events: _events, ...manga } = group.canonical;
+  const [rows, stored, events] = await Promise.all([
+    prisma.manga.findMany({
+      where: { id: { in: group.memberIds } },
+      omit: { coverImage: true },
+      orderBy: { createdAt: "asc" },
+    }),
+    storedCoverIds(group.memberIds),
+    prisma.readingEvent.findMany({
+      where: { mangaId: { in: group.memberIds } },
+      orderBy: { readAt: "desc" },
+    }),
+  ]);
+  const withFlag = rows.map((row) => ({
+    ...row,
+    hasStoredCover: stored.has(row.id),
+  }));
+  const manga = withFlag.find((row) => row.id === group.canonicalId);
+  if (manga === undefined) {
+    return null;
+  }
   return {
     manga,
-    aliases: group.aliases.map(({ events: _aliasEvents, ...alias }) => alias),
-    events: dedupeChapters(groupEvents(group)),
+    aliases: withFlag.filter((row) => row.id !== group.canonicalId),
+    events: dedupeChapters(events),
   };
 }
 
@@ -415,19 +697,30 @@ const MAX_REFERER_ATTEMPTS = 4;
  * referer (img2mw.xyz wants manhwaweb even when the latest reads happen on
  * lectorxd). A successful proxy fetch persists the bytes, so each cover is
  * fetched from its CDN at most once. fetchFn is injectable for tests.
+ *
+ * Reads one row and the card's domains — it used to load the whole library,
+ * once per cover the grid asked for.
  */
 export async function fetchMangaCover(
   id: string,
   fetchFn: FetchLike = fetch,
 ): Promise<CoverImage | null> {
-  const groups = await loadGroups();
-  const group = groups.find((candidate) => candidate.memberIds.includes(id));
-  if (group === undefined) {
+  const group = await loadGroupOf(id);
+  if (group === null) {
     return null;
   }
-  // Referers come from the whole group: after a merge the cover often belongs
-  // to a CDN of the OTHER site of the pair, which only accepts its own referer.
-  const manga = { ...group.canonical, events: groupEvents(group) };
+  const manga = await prisma.manga.findUnique({
+    where: { id: group.canonicalId },
+    select: {
+      id: true,
+      coverUrl: true,
+      coverImage: true,
+      coverImageType: true,
+    },
+  });
+  if (manga === null) {
+    return null;
+  }
   if (manga.coverImage !== null && manga.coverImageType !== null) {
     return {
       body: toArrayBuffer(manga.coverImage),
@@ -448,9 +741,9 @@ export async function fetchMangaCover(
     return null;
   }
 
-  const domains = [
-    ...new Set(manga.events.map((event) => event.sourceDomain)),
-  ].slice(0, MAX_REFERER_ATTEMPTS);
+  // Referers come from the whole group: after a merge the cover often belongs
+  // to a CDN of the OTHER site of the pair, which only accepts its own referer.
+  const domains = (await groupDomains(group)).slice(0, MAX_REFERER_ATTEMPTS);
   const referers = domains.length
     ? domains.map((domain) => `https://${domain}/`)
     : [`${coverUrl.origin}/`];
@@ -490,6 +783,28 @@ export async function fetchMangaCover(
   return { body, contentType };
 }
 
+/**
+ * The sites a card was read on, most recent first: from the read model while
+ * the card is shown, from its events when it is not (a deleted card still has
+ * a cover to serve to a link that points at it).
+ */
+async function groupDomains(group: GroupRef): Promise<string[]> {
+  const entry = await prisma.libraryEntry.findUnique({
+    where: { mangaId: group.canonicalId },
+    select: { sourceDomains: true },
+  });
+  if (entry !== null) {
+    // Cast justified: written by projectEntry as a JSON array of strings.
+    return JSON.parse(entry.sourceDomains) as string[];
+  }
+  const events = await prisma.readingEvent.findMany({
+    where: { mangaId: { in: group.memberIds } },
+    select: { sourceDomain: true },
+    orderBy: { readAt: "desc" },
+  });
+  return [...new Set(events.map((event) => event.sourceDomain))];
+}
+
 async function fetchCover(
   fetchFn: FetchLike,
   url: string,
@@ -524,9 +839,8 @@ async function fetchCover(
  * other site.
  */
 export async function deleteManga(id: string): Promise<boolean> {
-  const groups = await loadGroups();
-  const group = groups.find((candidate) => candidate.memberIds.includes(id));
-  if (group === undefined || group.canonical.deletedAt !== null) {
+  const group = await loadGroupOf(id);
+  if (group === null || !(await hasCard(group.canonicalId))) {
     return false;
   }
   const now = new Date();
@@ -536,49 +850,4 @@ export async function deleteManga(id: string): Promise<boolean> {
   });
   publishLibraryChanged();
   return true;
-}
-
-function project(
-  group: MangaGroup<MangaWithEvents>,
-  events: ReadingEvent[],
-): LibraryProjection {
-  const manga = group.canonical;
-  // events arrive desc by readAt; strict > keeps the most recent among ties
-  let reachedChapter: { number: number; label: string } | null = null;
-  for (const event of events) {
-    if (
-      event.chapterNumber !== null &&
-      (reachedChapter === null || event.chapterNumber > reachedChapter.number)
-    ) {
-      reachedChapter = {
-        number: event.chapterNumber,
-        label: event.chapterLabel,
-      };
-    }
-  }
-
-  // "Last activity" is the newest event, deduplicated or not — re-reading a
-  // chapter on the other site IS activity, and it is where to keep reading.
-  const latest = events[0] ?? null;
-
-  return {
-    id: manga.id,
-    canonicalName: manga.canonicalName,
-    normalizedSlug: manga.normalizedSlug,
-    coverUrl: manga.coverUrl,
-    coverVersion: manga.coverVersion,
-    hasStoredCover: manga.coverImage !== null,
-    status: manga.status,
-    tags: manga.tags,
-    reachedChapter,
-    lastActivity: latest
-      ? { readAt: latest.readAt, chapterLabel: latest.chapterLabel }
-      : null,
-    lastSourceUrl: latest?.sourceUrl ?? null,
-    // Distinct chapters, not rows: after a merge the same chapter usually has
-    // one event per site, and counting rows would double the progress shown.
-    readCount: new Set(events.map(chapterKey)).size,
-    sourceDomains: [...new Set(events.map((event) => event.sourceDomain))],
-    aliasCount: group.aliases.length,
-  };
 }

@@ -1,5 +1,11 @@
 import { prisma } from "../../db/client";
+import {
+  inChunks,
+  refreshProjection,
+  storedCoverIds,
+} from "../../db/library-projection";
 import type { Manga } from "../../generated/prisma/client";
+import { candidatePairs } from "../../lib/duplicate-candidates";
 import {
   dismissalKey,
   resolveCanonical,
@@ -9,16 +15,50 @@ import { tagsFromJson } from "../../lib/schemas";
 import {
   SUGGEST_SCORE,
   type TitleMatchReason,
-  titleSimilarity,
+  titleSimilarityAtLeast,
 } from "../../lib/similarity";
 import { publishLibraryChanged } from "../events/events.bus";
 
+/** A manga row without its cover bytes, told whether it has any. */
+export type PairSide = Omit<Manga, "coverImage"> & { hasStoredCover: boolean };
+
 export interface DuplicatePair {
-  a: Manga;
-  b: Manga;
+  a: PairSide;
+  b: PairSide;
   similarity: number;
   reasons: TitleMatchReason[] | ["cover"];
   sequelSuspicion: boolean;
+}
+
+interface ScoredPair {
+  aId: string;
+  bId: string;
+  similarity: number;
+  reasons: TitleMatchReason[] | ["cover"];
+  sequelSuspicion: boolean;
+}
+
+/**
+ * The last answer, and the revision it was computed at. LibraryRevision.titles
+ * moves only when a title, a cover, a merge, a deletion or a dismissal does —
+ * never on a reading — so a library read every day keeps its report until
+ * something that could change it happens.
+ *
+ * A promise, so a second request arriving while the first is still scoring
+ * waits for that work instead of starting the same work again.
+ */
+let cache: { revision: number; pairs: Promise<ScoredPair[]> } | null = null;
+
+/** Pairs scored between two turns of the event loop. */
+const SCORE_SLICE = 20_000;
+
+/**
+ * Scoring a large library takes about a second, and the server has one
+ * thread: done in one go, an ingestion arriving meanwhile — a chapter being
+ * read right now — would wait for all of it. Between slices it does not.
+ */
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 /**
@@ -35,58 +75,147 @@ export interface DuplicatePair {
  *   cover on each request would buy nothing.
  *
  * Pairs the user rejected (DuplicateDismissal) never come back.
+ *
+ * Scored only where a pair could match (lib/duplicate-candidates.ts) instead
+ * of every title against every other, and remembered until the titles change.
  */
 export async function findDuplicatePairs(): Promise<DuplicatePair[]> {
-  const [mangas, dismissals] = await Promise.all([
+  await refreshProjection();
+  const revision = (
+    await prisma.libraryRevision.findUnique({ where: { id: 1 } })
+  )?.titles;
+  if (revision === undefined) {
+    return withRows(await scorePairs());
+  }
+  if (cache === null || cache.revision !== revision) {
+    const pairs = scorePairs();
+    const entry = { revision, pairs };
+    cache = entry;
+    // A failed scoring is not an answer to remember; the next request retries.
+    pairs.catch(() => {
+      if (cache === entry) {
+        cache = null;
+      }
+    });
+  }
+  return withRows(await cache.pairs);
+}
+
+async function scorePairs(): Promise<ScoredPair[]> {
+  const [entries, rows, dismissals] = await Promise.all([
+    prisma.libraryEntry.findMany({ select: { mangaId: true } }),
+    // Ordered by age, as they always were: which side of a pair is `a` decides
+    // the order of the merge buttons, and should not move between releases.
+    // Every alive row, narrowed to the cards in memory below: an IN of every
+    // card's id is past the driver's parameter limit in a large library.
     prisma.manga.findMany({
-      // A deleted manga is not a duplicate candidate; its row only lingers so
-      // the deletion can reach the other machines.
       where: { deletedAt: null },
+      select: { id: true, normalizedSlug: true, coverUrl: true },
       orderBy: { createdAt: "asc" },
     }),
-    prisma.duplicateDismissal.findMany(),
+    prisma.duplicateDismissal.findMany({
+      select: { slugA: true, slugB: true },
+    }),
   ]);
-
+  const cards = new Set(entries.map((entry) => entry.mangaId));
+  const candidates = rows.filter((row) => cards.has(row.id));
   const rejected = new Set(
     dismissals.map((row) => `${row.slugA}|${row.slugB}`),
   );
-  const candidates = resolveMangaGroups(mangas).map((group) => group.canonical);
 
-  // O(n²) over tens of mangas — sub-millisecond, not worth anything smarter.
-  const pairs: DuplicatePair[] = [];
-  for (let i = 0; i < candidates.length; i++) {
-    for (let j = i + 1; j < candidates.length; j++) {
-      const [a, b] = [candidates[i], candidates[j]];
-      const key = dismissalKey(a.normalizedSlug, b.normalizedSlug);
-      if (rejected.has(`${key.slugA}|${key.slugB}`)) {
-        continue;
-      }
+  const isRejected = (slugA: string, slugB: string) => {
+    const key = dismissalKey(slugA, slugB);
+    return rejected.has(`${key.slugA}|${key.slugB}`);
+  };
 
-      if (a.coverUrl !== null && a.coverUrl === b.coverUrl) {
+  const pairs: ScoredPair[] = [];
+  const candidateIndexes = candidatePairs(
+    candidates.map((manga) => ({
+      slug: manga.normalizedSlug,
+      coverUrl: manga.coverUrl,
+    })),
+  );
+  for (let index = 0; index < candidateIndexes.length; index++) {
+    if (index > 0 && index % SCORE_SLICE === 0) {
+      await yieldToEventLoop();
+    }
+    const [i, j] = candidateIndexes[index] as [number, number];
+    const [a, b] = [candidates[i], candidates[j]];
+    if (a === undefined || b === undefined) {
+      continue;
+    }
+    // Dismissals are checked on what matched, not on every candidate: the
+    // key is a string built per pair, and almost no candidate matches.
+    if (a.coverUrl !== null && a.coverUrl === b.coverUrl) {
+      if (!isRejected(a.normalizedSlug, b.normalizedSlug)) {
         pairs.push({
-          a,
-          b,
+          aId: a.id,
+          bId: b.id,
           similarity: 1,
           reasons: ["cover"],
           sequelSuspicion: false,
         });
-        continue;
       }
-
-      const match = titleSimilarity(a.normalizedSlug, b.normalizedSlug);
-      if (match.score >= SUGGEST_SCORE) {
-        pairs.push({
-          a,
-          b,
-          similarity: match.score,
-          reasons: match.reasons,
-          sequelSuspicion: match.sequelSuspicion,
-        });
-      }
+      continue;
+    }
+    const match = titleSimilarityAtLeast(
+      a.normalizedSlug,
+      b.normalizedSlug,
+      SUGGEST_SCORE,
+    );
+    if (match !== null && !isRejected(a.normalizedSlug, b.normalizedSlug)) {
+      pairs.push({
+        aId: a.id,
+        bId: b.id,
+        similarity: match.score,
+        reasons: match.reasons,
+        sequelSuspicion: match.sequelSuspicion,
+      });
     }
   }
-
+  // Stable, and the candidates came in (i, j) order: equal scores keep the
+  // order a full double loop would have produced.
   return pairs.toSorted((x, y) => y.similarity - x.similarity);
+}
+
+/**
+ * The cached pairs with their rows read fresh — a status or a tag changes
+ * without moving the revision, and the report must show the current one.
+ */
+async function withRows(
+  pairs: readonly ScoredPair[],
+): Promise<DuplicatePair[]> {
+  const ids = [...new Set(pairs.flatMap((pair) => [pair.aId, pair.bId]))];
+  if (ids.length === 0) {
+    return [];
+  }
+  const [rows, stored] = await Promise.all([
+    inChunks(ids, (chunk) =>
+      prisma.manga.findMany({
+        where: { id: { in: chunk } },
+        omit: { coverImage: true },
+      }),
+    ),
+    storedCoverIds(ids),
+  ]);
+  const byId = new Map(
+    rows.map((row) => [row.id, { ...row, hasStoredCover: stored.has(row.id) }]),
+  );
+  return pairs.flatMap((pair) => {
+    const a = byId.get(pair.aId);
+    const b = byId.get(pair.bId);
+    return a !== undefined && b !== undefined
+      ? [
+          {
+            a,
+            b,
+            similarity: pair.similarity,
+            reasons: pair.reasons,
+            sequelSuspicion: pair.sequelSuspicion,
+          },
+        ]
+      : [];
+  });
 }
 
 export type MergeOutcome =

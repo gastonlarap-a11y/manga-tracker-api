@@ -3,6 +3,7 @@ import { OpenAPIHono } from "@hono/zod-openapi";
 import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
 import { config } from "./config";
+import { refreshProjection } from "./db/library-projection";
 import { applyMigrations } from "./db/migrate";
 import { allowedOrigins } from "./lib/cors";
 import { errorHandler } from "./lib/http";
@@ -56,6 +57,20 @@ app.route("/api", syncRoutes);
 // Off-site replica (Azure DocumentDB). Inert unless MONGODB_URL is set, and it
 // never sits in the request path: SQLite remains the source of truth.
 startSyncScheduler();
+
+// The library's read model, brought current now rather than by the first
+// dashboard request — after an update that added a migration, that is a
+// whole rebuild, and the window should not be the one waiting on it.
+const projectionStart = performance.now();
+refreshProjection().then(
+  () =>
+    console.info(
+      `[library] projection ready in ${Math.round(performance.now() - projectionStart)} ms`,
+    ),
+  (cause: unknown) =>
+    // Not fatal: every read refreshes it again, and says so if it still fails.
+    console.error("[library] projection refresh failed at startup:", cause),
+);
 
 // Dashboard: static build of manga-tracker-dashboard, copied into ./public by
 // its `bun run deploy`. Only the known SPA routes fall back to index.html, so

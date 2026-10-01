@@ -10,6 +10,9 @@ the user owns, off unless configured.
 - `src/index.ts` — entry point: builds the OpenAPIHono app, mounts modules, serves `/docs`
 - `src/config.ts` — the only place that reads environment variables
 - `src/db/client.ts` — PrismaClient wired to the libSQL adapter
+- `src/db/library-projection.ts` — the library's read model (see Architecture): the only writer
+  of `LibraryEntry`, `LibraryEntryDomain`, `LibraryMember` and `LibraryDirty`. In `db` and not
+  in the library module because duplicates reads it too
 - `src/modules/<feature>/` — one vertical slice: `*.routes.ts` + `*.service.ts` + `*.test.ts`
   (plus extra colocated units when needed, e.g. `events/events.bus.ts`)
 - `src/modules/sync/` — optional two-way sync with Azure DocumentDB (`sync.target.ts` is the ONLY
@@ -51,6 +54,8 @@ the user owns, off unless configured.
 - Lint: `bun run lint` · Format: `bun run format` · Typecheck: `bun run typecheck`
 - Prisma client: `bun run db:generate` · Migrations: `bun run db:migrate`
 - Package: `bun run package -- --out <dir> [--dashboard <dist>]`
+- Scale benchmark: `bun run bench:library [series] [readings]` (default 10 000 / 1 000 000, on a
+  throwaway database; prints every read the dashboard makes, timed)
 - Deploy: `bun run deploy` (add `--dry-run` to see the steps without touching production)
 - Azure: `bun run deploy:provision` (create the vault) · `bun run env:push` / `bun run env:pull`
 - Inspect config: `bun run env:show` (every profile + drift on disk; read-only, no network)
@@ -233,6 +238,35 @@ the user owns, off unless configured.
     same identity the ingestion uses, so a chapter read on both sites is listed once and
     `readCount` counts chapters, not rows.
   - Merge chains are flattened on write: `A→B→C` is never persisted.
+- **The library is read from a projection, never computed per request.** Every request used to
+  load every manga — cover bytes included — and every event, and group them in memory: 2.2 s
+  of loading alone at 10 000 series and a million readings, before any work. `LibraryEntry` is
+  one row per card with its aggregates, indexed for every order the dashboard offers;
+  `LibraryEntryDomain` makes the site filter an index lookup; `LibraryMember` resolves any id,
+  an alias's too, to its card in one lookup.
+  - **Kept current by triggers, not by the code that writes.** Ingestion, edits, merges,
+    deletes and sync all write `Manga` and `ReadingEvent`; a trigger marks the row in
+    `LibraryDirty` (and, for a merge pointer or a slug that moved, the rows on the other end),
+    and a new write path cannot forget to. Every read that serves the library calls
+    `refreshProjection()` first, which recomputes only the marked groups — serialized, and
+    clearing only the marks it read, so one set meanwhile survives for the next. Never write
+    the projection tables anywhere else.
+  - The triggers live in the migration that creates the tables; Prisma does not model them, so
+    `prisma migrate diff` never shows them. **Prisma alters a SQLite column by rebuilding the
+    table, which drops its triggers**: a migration that rebuilds `Manga`, `ReadingEvent` or
+    `DuplicateDismissal` must create them again. A test lists every trigger and fails when one
+    is missing.
+  - The projection agrees with computing the library from scratch: a test runs hundreds of
+    random writes of every kind against both and compares them throughout.
+  - Pages are keyset cursors over `(sort key, mangaId)`, never `OFFSET`, so a deep page costs
+    what the first does. `GET /library` (the whole list) stays for the extension.
+  - **An `in:` over a list that grows with the library goes through `inChunks`.** The libSQL
+    driver refuses a query past its bound-parameter limit, which no library of a few hundred
+    mangas reaches and one of ten thousand reaches on its first read.
+  - Measured at 10 000 series / 1 000 000 readings (`bun run bench:library`): a page in
+    0.4–2 ms at any depth, order or filter; the summary in 6 ms; a reading arriving and the
+    next page in 17 ms; the first refresh after the migration, which builds everything once,
+    in ~5 s.
 - Duplicate detection is `titleSimilarity` (`src/lib/similarity.ts`): fuzzy token pairing
   weighted by word length, with whole-string edit distance as a floor. Plain Levenshtein over
   slugs was not enough — two sites translating one Japanese title differently score 0.79 as
@@ -243,6 +277,20 @@ the user owns, off unless configured.
     modules never import each other.
   - `DuplicateDismissal` is the mandatory counterpart of the lower suggestion threshold: without
     a way to reject a pair, a false positive returns on every load.
+  - **`/duplicates` never scores every pair.** That was quadratic — hours at 10 000 titles.
+    `src/lib/duplicate-candidates.ts` files each title under keys such that two titles that
+    could reach a suggestion always share one (word deletion neighbourhoods of depth ⌊L/5⌋,
+    the joined slug, the words as a set, the cover), and only pairs sharing a key are scored.
+    A key shared by too many titles is dropped as a common word. It equals brute force on small
+    libraries and keeps every planted variant at 10 000 — both are tests.
+  - Pairs are scored with `titleSimilarityAtLeast`, which answers exactly what
+    `titleSimilarity` does when the score reaches the floor and gives up early when it cannot
+    (banded edit distance). The ingestion's auto-merge search uses it too, at
+    `AUTO_MERGE_SCORE`. A property test holds both answers equal.
+  - The result is remembered against `LibraryRevision.titles`, which the triggers move on a
+    title, a cover, a merge, a deletion or a dismissal — never on a reading. Scoring yields to
+    the event loop between slices, so an ingestion arriving meanwhile is not held up by it.
+    Measured at 10 000: ~1.3 s cold, 0.1 ms remembered.
   - There is deliberately **no external catalogue lookup** (MangaDex/AniList) for multi-language
     aliases: it would trade `no cloud dependencies` for a guess. Titles no local heuristic can
     relate are joined by hand from the dashboard (`POST /api/duplicates/merge` accepts any pair).
