@@ -224,6 +224,10 @@ model SiteAdapter {
   // Same reasoning as Manga.updatedAt: set explicitly, never by @updatedAt, so
   // a document pulled from a peer keeps the timestamp that decides who wins.
   updatedAt DateTime @default(now())
+  // A removed calibration is kept as a tombstone, not deleted: a deleted row
+  // would come straight back from the shared store on the next pull, which
+  // still holds it. Converges like any other value; recalibrating clears it.
+  deletedAt DateTime?
 }
 
 /// When the extension counts a chapter page as read, set from the dashboard.

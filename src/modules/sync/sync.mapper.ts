@@ -77,6 +77,8 @@ export interface SiteAdapterDoc {
   chapterUrlRegex: string | null;
   createdAt: Date;
   updatedAt: Date;
+  /** Removed: a tombstone that converges, never a document taken away. */
+  deletedAt: Date | null;
 }
 
 export interface CoverDoc {
@@ -130,6 +132,7 @@ interface SiteAdapterRow {
   chapterUrlRegex: string | null;
   createdAt: Date;
   updatedAt: Date;
+  deletedAt: Date | null;
 }
 
 // ------------------------------------------------------
@@ -190,6 +193,7 @@ export function toAdapterDoc(adapter: SiteAdapterRow): SiteAdapterDoc {
     chapterUrlRegex: adapter.chapterUrlRegex,
     createdAt: adapter.createdAt,
     updatedAt: adapter.updatedAt,
+    deletedAt: adapter.deletedAt,
   };
 }
 
@@ -380,6 +384,7 @@ export interface AdapterMerge {
   chapterUrlRegex: string | null;
   createdAt: Date;
   updatedAt: Date;
+  deletedAt: Date | null;
 }
 
 export function fromAdapterDoc(doc: Record<string, unknown>): AdapterMerge {
@@ -392,6 +397,8 @@ export function fromAdapterDoc(doc: Record<string, unknown>): AdapterMerge {
     chapterUrlRegex: asNullableString(doc.chapterUrlRegex),
     createdAt: asDate(doc.createdAt),
     updatedAt: asDate(doc.updatedAt),
+    // Absent on every document written before removal existed: alive.
+    deletedAt: asNullableDate(doc.deletedAt),
   };
 }
 

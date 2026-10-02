@@ -77,7 +77,10 @@ the user owns, off unless configured.
   every machine, would ride the Mongo sync as if it were reading history, and could not be
   tested. A rule earns its place only when the generic heuristic gets that site wrong, and
   every one is measured against real history first — one key per series, and never one key
-  shared by two. A user's own calibration overrides the catalogue. A rule may also carry
+  shared by two. A user's own calibration overrides the catalogue, and can be taken back
+  (`DELETE /api/adapters/{domain}`) — as a **tombstone** (`SiteAdapter.deletedAt`, stamped
+  `updatedAt`), never a deleted row: the shared store still holds the calibration, and the
+  next pull would bring a deleted row straight back. Recalibrating clears it. A rule may also carry
   `aliases` (the domains a Spanish site rotates through; a URL on an alias is matched as if
   it were on `domain`, so the series key survives the move), `ignorePaths`, a per-site
   threshold and settle delay, and curated selectors. Every field after `chapterUrlRegex` is

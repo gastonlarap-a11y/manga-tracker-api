@@ -202,12 +202,16 @@ export async function syncWithReplica(
           chapterUrlRegex: remote.chapterUrlRegex,
           createdAt: remote.createdAt,
           updatedAt: remote.updatedAt,
+          deletedAt: remote.deletedAt,
         },
         update: {
           titleSelector: remote.titleSelector,
           chapterSelector: remote.chapterSelector,
           chapterUrlRegex: remote.chapterUrlRegex,
           updatedAt: remote.updatedAt,
+          // A removal made elsewhere arrives like any other newer write, and
+          // so does a recalibration that undoes one.
+          deletedAt: remote.deletedAt,
         },
       });
       pulled.adapters += 1;
