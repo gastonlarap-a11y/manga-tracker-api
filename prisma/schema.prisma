@@ -225,3 +225,19 @@ model SiteAdapter {
   // a document pulled from a peer keeps the timestamp that decides who wins.
   updatedAt DateTime @default(now())
 }
+
+/// When the extension counts a chapter page as read, set from the dashboard.
+/// One row (id 1), absent until someone changes a value — the defaults below
+/// are what an absent row means. Local to this machine and never synced: how
+/// long someone reads on this computer is not a fact about their library.
+model ExtensionSettings {
+  id                   Int      @id
+  // Off by default: a chapter counts the moment its page is recognised, which
+  // is how every release before this one behaved.
+  readingRequired      Boolean  @default(false)
+  // Seconds the page has to stay visible, and how far down it has to be
+  // scrolled. Either at 0 drops that condition.
+  readMinSeconds       Int      @default(30)
+  readMinScrollPercent Int      @default(80)
+  updatedAt            DateTime @default(now())
+}

@@ -77,7 +77,27 @@ the user owns, off unless configured.
   every machine, would ride the Mongo sync as if it were reading history, and could not be
   tested. A rule earns its place only when the generic heuristic gets that site wrong, and
   every one is measured against real history first — one key per series, and never one key
-  shared by two. A user's own calibration overrides the catalogue.
+  shared by two. A user's own calibration overrides the catalogue. A rule may also carry
+  `aliases` (the domains a Spanish site rotates through; a URL on an alias is matched as if
+  it were on `domain`, so the series key survives the move), `ignorePaths`, a per-site
+  threshold and settle delay, and curated selectors. Every field after `chapterUrlRegex` is
+  one extension 0.1.4 ignores, so adding them broke no installed browser.
+- **The same reasoning covers every site at once** (`src/lib/extension-config.ts` +
+  `GET /api/extension-config`): tuning for the extension's generic heuristic, the site themes
+  it recognises (Madara, MangaThemesia — 44 of 105 Spanish sites measured), notices for its
+  popup, and `minExtensionVersion`. Two rules hold it together. **Data, never code**: numbers,
+  words, regexes and CSS selectors that the extension's compiled code interprets — Manifest
+  V3 forbids running code an extension did not ship with, and the Web Store reviews for it.
+  **Additions and overrides, never a copy of the defaults**: the vocabulary lives once,
+  compiled into the extension and proven by its tests; a list here is added to it and a
+  number replaces its default, so a bad edit here can teach the extension nothing useful but
+  cannot stop a site that works. The catalogue's tests refuse a regex that does not compile
+  and a selector a browser cannot parse (`src/lib/css-selector.ts`, test-only happy-dom).
+- **The reading settings are this machine's** (`ExtensionSettings`, one row, edited from the
+  dashboard's Extensión page and served inside the extension config): whether a chapter
+  counts only once read, and for how long and how far down. An absent row is the defaults,
+  and it is **never synced** — how long someone reads on this computer is not a fact about
+  their library.
 - **A title that is only the site naming itself is refused at ingestion** (`isSiteNameTitle`,
   applied as a `.refine` on `POST /events`). A Cloudflare interstitial answers the chapter's
   own URL with the hostname as its heading, and a detector cannot tell that from a manga name
