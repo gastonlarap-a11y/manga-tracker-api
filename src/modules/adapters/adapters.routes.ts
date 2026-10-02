@@ -1,7 +1,12 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import type { SiteAdapter } from "../../generated/prisma/client";
 import { defaultHook, errorSchema } from "../../lib/http";
-import { getAdapterByDomain, upsertAdapter } from "./adapters.service";
+import {
+  getAdapterByDomain,
+  listAdapters,
+  removeAdapter,
+  upsertAdapter,
+} from "./adapters.service";
 
 export const siteAdapterSchema = z
   .object({
@@ -77,7 +82,40 @@ const postAdapterRoute = createRoute({
   },
 });
 
+const listAdaptersRoute = createRoute({
+  method: "get",
+  path: "/adapters",
+  tags: ["adapters"],
+  responses: {
+    200: {
+      description:
+        "Every calibration made on this machine (or synced to it), removed ones left out",
+      content: { "application/json": { schema: z.array(siteAdapterSchema) } },
+    },
+  },
+});
+
+const deleteAdapterRoute = createRoute({
+  method: "delete",
+  path: "/adapters/{domain}",
+  tags: ["adapters"],
+  request: { params: z.object({ domain: z.string().min(1) }) },
+  responses: {
+    204: {
+      description:
+        "Calibration removed here and, after the next sync, everywhere; the site falls back to its curated rule and the generic heuristics",
+    },
+    404: {
+      description: "No calibration stored for this domain",
+      content: { "application/json": { schema: errorSchema } },
+    },
+  },
+});
+
 export const adaptersRoutes = new OpenAPIHono({ defaultHook })
+  .openapi(listAdaptersRoute, async (c) =>
+    c.json((await listAdapters()).map(toAdapterDto), 200),
+  )
   .openapi(getAdapterRoute, async (c) => {
     const { domain } = c.req.valid("param");
     const adapter = await getAdapterByDomain(domain);
@@ -90,4 +128,11 @@ export const adaptersRoutes = new OpenAPIHono({ defaultHook })
     const body = c.req.valid("json");
     const adapter = await upsertAdapter(body);
     return c.json(toAdapterDto(adapter), 200);
+  })
+  .openapi(deleteAdapterRoute, async (c) => {
+    const { domain } = c.req.valid("param");
+    if (!(await removeAdapter(domain))) {
+      return c.json({ error: "Adapter not found" }, 404);
+    }
+    return c.body(null, 204);
   });

@@ -102,4 +102,30 @@ describe("GET /site-rules", () => {
 
     expect(new Set(domains).size).toBe(domains.length);
   });
+
+  it("leaves a removed calibration out, and keeps the curated rule it hid", async () => {
+    await prisma.siteAdapter.create({
+      data: {
+        domain: "olympusxyz.com",
+        titleSelector: "h1.series",
+        deletedAt: new Date(),
+      },
+    });
+    await prisma.siteAdapter.create({
+      data: {
+        domain: "leercapitulo.com",
+        titleSelector: "h1",
+        deletedAt: new Date(),
+      },
+    });
+
+    const rules = await list();
+
+    expect(rules.some((rule) => rule.domain === "leercapitulo.com")).toBe(
+      false,
+    );
+    const olympus = rules.find((rule) => rule.domain === "olympusxyz.com");
+    expect(olympus?.titleSelector).toBeNull();
+    expect(olympus?.series).not.toBeNull();
+  });
 });

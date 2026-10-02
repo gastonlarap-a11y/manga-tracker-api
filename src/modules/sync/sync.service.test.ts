@@ -4,7 +4,12 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { prisma } from "../../db/client";
 import { createFakeTarget, type FakeTarget } from "./sync.fake-target";
-import type { DismissalDoc, MangaDoc, ReadingEventDoc } from "./sync.mapper";
+import type {
+  DismissalDoc,
+  MangaDoc,
+  ReadingEventDoc,
+  SiteAdapterDoc,
+} from "./sync.mapper";
 import { restoreFromReplica, syncWithReplica } from "./sync.service";
 
 const sync = (target: FakeTarget, covers = false) =>
@@ -609,5 +614,102 @@ describe("Sync: rejected duplicate pairs converge, last write wins", () => {
     const result = await sync(target);
     expect(result.pulled.dismissals).toBe(0);
     expect(await prisma.duplicateDismissal.count()).toBe(0);
+  });
+});
+
+describe("Sync: a removed calibration stays removed", () => {
+  const OLD = new Date("2026-03-01T00:00:00.000Z");
+  const NEW = new Date("2026-03-02T00:00:00.000Z");
+
+  const peerAdapter = (over: Partial<SiteAdapterDoc> = {}): SiteAdapterDoc => ({
+    _id: "lectorxd.com",
+    id: "peer-adapter",
+    titleSelector: "h1",
+    chapterSelector: ".chapter",
+    chapterUrlRegex: null,
+    createdAt: OLD,
+    updatedAt: OLD,
+    deletedAt: null,
+    ...over,
+  });
+
+  const local = () =>
+    prisma.siteAdapter.findUniqueOrThrow({ where: { domain: "lectorxd.com" } });
+
+  it("pushes a removal made here, and the next pull does not bring it back", async () => {
+    // Deleting the row outright is what this guards against: the shared
+    // store still holds it, and the pull would recreate it.
+    const target = createFakeTarget();
+    target.adapters.set("lectorxd.com", peerAdapter());
+    await prisma.siteAdapter.create({
+      data: {
+        domain: "lectorxd.com",
+        titleSelector: "h1",
+        chapterSelector: ".chapter",
+        createdAt: OLD,
+        updatedAt: NEW,
+        deletedAt: NEW,
+      },
+    });
+
+    await sync(target);
+    await sync(target);
+
+    expect(target.adapters.get("lectorxd.com")?.deletedAt).toEqual(NEW);
+    expect((await local()).deletedAt).toEqual(NEW);
+  });
+
+  it("applies a removal made on another machine", async () => {
+    const target = createFakeTarget();
+    await prisma.siteAdapter.create({
+      data: {
+        domain: "lectorxd.com",
+        titleSelector: "h1",
+        createdAt: OLD,
+        updatedAt: OLD,
+      },
+    });
+    target.adapters.set(
+      "lectorxd.com",
+      peerAdapter({ updatedAt: NEW, deletedAt: NEW }),
+    );
+
+    const result = await sync(target);
+
+    expect(result.pulled.adapters).toBe(1);
+    expect((await local()).deletedAt).toEqual(NEW);
+  });
+
+  it("lets a newer recalibration elsewhere undo an older removal here", async () => {
+    const target = createFakeTarget();
+    await prisma.siteAdapter.create({
+      data: {
+        domain: "lectorxd.com",
+        titleSelector: "h1",
+        createdAt: OLD,
+        updatedAt: OLD,
+        deletedAt: OLD,
+      },
+    });
+    target.adapters.set(
+      "lectorxd.com",
+      peerAdapter({ titleSelector: "h1 > span", updatedAt: NEW }),
+    );
+
+    await sync(target);
+
+    const adapter = await local();
+    expect(adapter.deletedAt).toBeNull();
+    expect(adapter.titleSelector).toBe("h1 > span");
+  });
+
+  it("reads a calibration written before removal existed as alive", async () => {
+    const target = createFakeTarget();
+    const { deletedAt: _omitted, ...legacy } = peerAdapter();
+    target.adapters.set("lectorxd.com", legacy as SiteAdapterDoc);
+
+    await sync(target);
+
+    expect((await local()).deletedAt).toBeNull();
   });
 });

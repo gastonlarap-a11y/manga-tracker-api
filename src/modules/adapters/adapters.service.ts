@@ -8,21 +8,41 @@ export interface UpsertAdapterInput {
   chapterUrlRegex?: string;
 }
 
-// Hostnames are case-insensitive, so the domain key is always lowercased.
-export function getAdapterByDomain(
+// Hostnames are case-insensitive, so the domain key is always lowercased. A
+// removed calibration is a tombstone (see `removeAdapter`): as if absent.
+export async function getAdapterByDomain(
   domain: string,
 ): Promise<SiteAdapter | null> {
-  return prisma.siteAdapter.findUnique({
+  const adapter = await prisma.siteAdapter.findUnique({
     where: { domain: domain.toLowerCase() },
   });
+  return adapter?.deletedAt === null ? adapter : null;
 }
 
 /**
  * Every calibration on this machine, for the single request the extension makes
- * to learn about sites (`GET /api/site-rules`).
+ * to learn about sites (`GET /api/site-rules`). Removed ones are left out.
  */
 export function listAdapters(): Promise<SiteAdapter[]> {
-  return prisma.siteAdapter.findMany({ orderBy: { domain: "asc" } });
+  return prisma.siteAdapter.findMany({
+    where: { deletedAt: null },
+    orderBy: { domain: "asc" },
+  });
+}
+
+/**
+ * Takes a calibration back. The row stays, marked removed and stamped, so the
+ * removal reaches the shared store and every other machine on the next sync —
+ * deleting it would let the next pull bring it straight back. False when the
+ * site has no calibration to remove.
+ */
+export async function removeAdapter(domain: string): Promise<boolean> {
+  const now = new Date();
+  const { count } = await prisma.siteAdapter.updateMany({
+    where: { domain: domain.toLowerCase(), deletedAt: null },
+    data: { deletedAt: now, updatedAt: now },
+  });
+  return count > 0;
 }
 
 /**
@@ -39,6 +59,8 @@ export function upsertAdapter(input: UpsertAdapterInput): Promise<SiteAdapter> {
     // Stamped by hand rather than by @updatedAt so a document pulled from
     // another machine keeps the timestamp that decides who wins.
     updatedAt: new Date(),
+    // Calibrating a site whose calibration was removed brings it back.
+    deletedAt: null,
   };
   return prisma.siteAdapter.upsert({
     where: { domain },
