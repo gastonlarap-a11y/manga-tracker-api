@@ -15,6 +15,7 @@ import {
   frameAncestors,
 } from "./modules/embedding/embedding.routes";
 import { eventsRoutes } from "./modules/events/events.routes";
+import { extensionRoutes } from "./modules/extension/extension.routes";
 import { healthRoutes } from "./modules/health/health.routes";
 import { libraryRoutes } from "./modules/library/library.routes";
 import { siteRulesRoutes } from "./modules/site-rules/site-rules.routes";
@@ -51,6 +52,7 @@ app.route("/api", eventsRoutes);
 app.route("/api", libraryRoutes);
 app.route("/api", adaptersRoutes);
 app.route("/api", siteRulesRoutes);
+app.route("/api", extensionRoutes);
 app.route("/api", duplicatesRoutes);
 app.route("/api", syncRoutes);
 
@@ -82,7 +84,7 @@ app.get("/favicon.svg", serveStatic({ path: "./public/favicon.svg" }));
 // platforms it was measured on, Report-Only elsewhere. src/modules/embedding
 // says why, and where the reports land.
 const dashboardFramePolicy = frameAncestors();
-for (const spaPath of ["/", "/manga/:id", "/duplicates"]) {
+for (const spaPath of ["/", "/manga/:id", "/duplicates", "/extension"]) {
   app.get(
     spaPath,
     dashboardFramePolicy,
