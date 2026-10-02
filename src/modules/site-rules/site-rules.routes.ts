@@ -1,6 +1,6 @@
 import { createRoute, OpenAPIHono, z } from "@hono/zod-openapi";
 import { defaultHook } from "../../lib/http";
-import { SITE_RULES } from "../../lib/site-rules";
+import { SITE_RULES, type SiteRule } from "../../lib/site-rules";
 import { listAdapters } from "../adapters/adapters.service";
 
 const seriesRuleSchema = z
@@ -15,12 +15,42 @@ const siteRuleSchema = z
   .object({
     domain: z.string(),
     series: seriesRuleSchema.nullable(),
-    // The calibrated half, absent for a curated rule nobody has calibrated.
+    // This machine's calibration when there is one, else the curated
+    // selectors; null when neither says.
     titleSelector: z.string().nullable(),
     chapterSelector: z.string().nullable(),
     chapterUrlRegex: z.string().nullable(),
+    // Curated only, and added after extension 0.1.4 — which ignores them.
+    aliases: z.array(z.string()),
+    ignorePaths: z.array(z.string()),
+    confidenceThreshold: z.number().nullable(),
+    settleDelayMs: z.number().int().nullable(),
+    seriesLinkSelector: z.string().nullable(),
+    nextSelector: z.string().nullable(),
   })
   .openapi("SiteRule");
+type SiteRuleDto = z.infer<typeof siteRuleSchema>;
+
+function toSiteRuleDto(rule: SiteRule): SiteRuleDto {
+  return {
+    domain: rule.domain,
+    series: rule.series ?? null,
+    titleSelector: rule.titleSelector ?? null,
+    chapterSelector: rule.chapterSelector ?? null,
+    chapterUrlRegex: null,
+    aliases: [...(rule.aliases ?? [])],
+    ignorePaths: [...(rule.ignorePaths ?? [])],
+    confidenceThreshold: rule.confidenceThreshold ?? null,
+    settleDelayMs: rule.settleDelayMs ?? null,
+    seriesLinkSelector: rule.seriesLinkSelector ?? null,
+    nextSelector: rule.nextSelector ?? null,
+  };
+}
+
+/** A site nobody curated: only what the calibration says about it. */
+function uncuratedRule(domain: string): SiteRuleDto {
+  return toSiteRuleDto({ domain, note: "" });
+}
 
 const listRoute = createRoute({
   method: "get",
@@ -47,24 +77,19 @@ export const siteRulesRoutes = new OpenAPIHono({ defaultHook }).openapi(
   listRoute,
   async (c) => {
     const adapters = await listAdapters();
-    const byDomain = new Map<string, z.infer<typeof siteRuleSchema>>();
+    const byDomain = new Map<string, SiteRuleDto>();
 
     for (const rule of SITE_RULES) {
-      byDomain.set(rule.domain, {
-        domain: rule.domain,
-        series: rule.series,
-        titleSelector: null,
-        chapterSelector: null,
-        chapterUrlRegex: null,
-      });
+      byDomain.set(rule.domain, toSiteRuleDto(rule));
     }
     for (const adapter of adapters) {
-      const curated = byDomain.get(adapter.domain);
+      const curated =
+        byDomain.get(adapter.domain) ?? uncuratedRule(adapter.domain);
       byDomain.set(adapter.domain, {
-        domain: adapter.domain,
-        // A calibration says nothing about series identity, so the curated rule
-        // survives one being saved for the same site.
-        series: curated?.series ?? null,
+        // A calibration says which element holds the title and nothing else,
+        // so everything else the curated rule knows survives one being saved
+        // for the same site — series identity above all.
+        ...curated,
         titleSelector: adapter.titleSelector,
         chapterSelector: adapter.chapterSelector,
         chapterUrlRegex: adapter.chapterUrlRegex,

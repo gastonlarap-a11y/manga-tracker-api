@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { isParsableSelector } from "./css-selector";
 import { seriesKeyFromUrl } from "./normalize";
 import {
+  onCanonicalHost,
   ruleFor,
   SITE_RULES,
   type SiteRule,
@@ -150,25 +152,125 @@ describe("olympusxyz.com", () => {
   });
 });
 
+describe("aliases", () => {
+  const moved: SiteRule = {
+    domain: "olympusxyz.com",
+    aliases: ["olympusbiblioteca.com"],
+    note: "test",
+    series: {
+      pattern: "^https?://olympusxyz\\.com/capitulo/\\d+/([^/?#]+)/?$",
+      template: "https://olympusxyz.com/$1",
+      navigable: false,
+    },
+  };
+
+  it("finds the rule from a host it is served on under another name", () => {
+    expect(ruleFor("olympusbiblioteca.com", [moved])?.domain).toBe(
+      "olympusxyz.com",
+    );
+    expect(ruleFor("www.olympusbiblioteca.com", [moved])?.domain).toBe(
+      "olympusxyz.com",
+    );
+    expect(ruleFor("biblioteca.com", [moved])).toBeNull();
+  });
+
+  it("keys a series read on an alias exactly as it is keyed on the domain", () => {
+    // The whole point of an alias: the site moving must not split one series
+    // into a card per domain it has lived on.
+    const onAlias = seriesUrlFromRule(
+      moved,
+      "https://olympusbiblioteca.com/capitulo/130756/comic-x",
+    );
+    const onDomain = seriesUrlFromRule(
+      moved,
+      "https://olympusxyz.com/capitulo/130756/comic-x",
+    );
+    expect(onAlias).toBe("https://olympusxyz.com/comic-x");
+    expect(onAlias).toBe(onDomain);
+  });
+
+  it("leaves a URL on the domain itself, or on an unrelated host, untouched", () => {
+    expect(onCanonicalHost(moved, "https://olympusxyz.com/a")).toBe(
+      "https://olympusxyz.com/a",
+    );
+    expect(onCanonicalHost(moved, "https://example.com/a")).toBe(
+      "https://example.com/a",
+    );
+    expect(onCanonicalHost(moved, "not a url")).toBe("not a url");
+  });
+});
+
+describe("a rule without a series half", () => {
+  it("derives no series identity, leaving it to the heuristic", () => {
+    const tuned: SiteRule = {
+      domain: "example.com",
+      note: "test",
+      confidenceThreshold: 0.6,
+    };
+    expect(
+      seriesUrlFromRule(tuned, "https://example.com/manga/x/1"),
+    ).toBeNull();
+  });
+});
+
 describe("the catalogue as a whole", () => {
   it("declares every composed identity as not navigable", () => {
     // Both rules assemble an address the site never published. Saying otherwise
     // would send the cover hunt to fetch a 404 and read it as "no cover".
     for (const rule of SITE_RULES) {
-      expect(rule.series.navigable).toBe(false);
+      if (rule.series !== undefined) {
+        expect(rule.series.navigable).toBe(false);
+      }
     }
   });
 
   it("carries a usable pattern and a note for every site", () => {
     for (const rule of SITE_RULES) {
-      expect(() => new RegExp(rule.series.pattern)).not.toThrow();
-      expect(rule.series.template).toContain("$1");
       expect(rule.note.length).toBeGreaterThan(0);
+      const { series } = rule;
+      if (series !== undefined) {
+        expect(() => new RegExp(series.pattern)).not.toThrow();
+        expect(series.template).toContain("$1");
+      }
+      for (const pattern of rule.ignorePaths ?? []) {
+        expect(() => new RegExp(pattern)).not.toThrow();
+      }
     }
   });
 
-  it("lists each domain once", () => {
-    const domains = SITE_RULES.map((rule) => rule.domain);
-    expect(new Set(domains).size).toBe(domains.length);
+  it("only carries selectors a browser can parse", () => {
+    for (const rule of SITE_RULES) {
+      for (const selector of [
+        rule.titleSelector,
+        rule.chapterSelector,
+        rule.seriesLinkSelector,
+        rule.nextSelector,
+      ]) {
+        if (selector !== undefined) {
+          expect(isParsableSelector(selector)).toBe(true);
+        }
+      }
+    }
+  });
+
+  it("keeps per-site tuning within what the extension accepts", () => {
+    for (const rule of SITE_RULES) {
+      if (rule.confidenceThreshold !== undefined) {
+        expect(rule.confidenceThreshold).toBeGreaterThan(0);
+        expect(rule.confidenceThreshold).toBeLessThanOrEqual(1);
+      }
+      if (rule.settleDelayMs !== undefined) {
+        expect(rule.settleDelayMs).toBeGreaterThanOrEqual(0);
+        expect(rule.settleDelayMs).toBeLessThanOrEqual(30_000);
+      }
+    }
+  });
+
+  it("lists each host once, aliases included", () => {
+    const hosts = SITE_RULES.flatMap((rule) => [
+      rule.domain,
+      ...(rule.aliases ?? []),
+    ]);
+    expect(new Set(hosts).size).toBe(hosts.length);
   });
 });

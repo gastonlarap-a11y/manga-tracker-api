@@ -9,6 +9,12 @@ type Listed = {
   titleSelector: string | null;
   chapterSelector: string | null;
   chapterUrlRegex: string | null;
+  aliases: string[];
+  ignorePaths: string[];
+  confidenceThreshold: number | null;
+  settleDelayMs: number | null;
+  seriesLinkSelector: string | null;
+  nextSelector: string | null;
 };
 
 const list = async (): Promise<Listed[]> => {
@@ -28,9 +34,32 @@ describe("GET /site-rules", () => {
     expect(rules).toHaveLength(SITE_RULES.length);
     for (const curated of SITE_RULES) {
       const served = rules.find((rule) => rule.domain === curated.domain);
-      expect(served?.series?.pattern).toBe(curated.series.pattern);
-      expect(served?.titleSelector).toBeNull();
+      expect(served?.series?.pattern).toBe(curated.series?.pattern);
+      expect(served?.titleSelector).toBe(curated.titleSelector ?? null);
+      expect(served?.aliases).toEqual([...(curated.aliases ?? [])]);
     }
+  });
+
+  it("sends every field, unset ones as null or empty", async () => {
+    // Extension 0.1.4 reads only the first five; 0.2.0 reads all of them and
+    // must never have to tell a missing field from an unset one.
+    const [first] = await list();
+
+    expect(Object.keys(first ?? {}).sort()).toEqual(
+      [
+        "aliases",
+        "chapterSelector",
+        "chapterUrlRegex",
+        "confidenceThreshold",
+        "domain",
+        "ignorePaths",
+        "nextSelector",
+        "series",
+        "seriesLinkSelector",
+        "settleDelayMs",
+        "titleSelector",
+      ].sort(),
+    );
   });
 
   it("adds this machine's calibrations to the list", async () => {
@@ -45,6 +74,8 @@ describe("GET /site-rules", () => {
     // Nothing curated for that site, and a calibration says nothing about
     // series identity.
     expect(calibrated?.series).toBeNull();
+    expect(calibrated?.aliases).toEqual([]);
+    expect(calibrated?.seriesLinkSelector).toBeNull();
   });
 
   it("keeps the curated series rule when the same site is calibrated", async () => {
