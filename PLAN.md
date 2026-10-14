@@ -80,7 +80,7 @@ model Manga {
   canonicalName  String
   normalizedSlug String         @unique
   coverUrl       String?        // og:image reportada por la extensión con cada evento
-  status         String         @default("reading") // reading | completed | dropped (manual)
+  status         String         @default("reading") // reading | on_hold | completed | dropped (manual)
   tags           String         @default("[]")      // tags manuales, JSON de strings
   createdAt      DateTime       @default(now())
   events         ReadingEvent[]

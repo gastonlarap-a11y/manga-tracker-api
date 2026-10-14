@@ -156,7 +156,9 @@ Tres tablas:
   `normalizedSlug` (**único**, la clave de deduplicación — jamás se corrige a mano), y tres
   campos que curás desde el dashboard: `coverUrl` (nullable — la portada que capturó la
   extensión o que fijaste a mano), `status` (`"reading"` por defecto; también
-  `"completed"` / `"dropped"`) y `tags` (un **string JSON** tipo `'["shonen","favs"]'` —
+  `"on_hold"` — en pausa: la seguís, pero la dejaste a un lado, por un hiatus o para juntar
+  capítulos —, `"completed"` / `"dropped"`; siempre manual: leer un capítulo nuevo no lo
+  cambia) y `tags` (un **string JSON** tipo `'["shonen","favs"]'` —
   SQLite no tiene columnas array ni enums, así que el array vive serializado y se valida en
   los bordes, ver `src/lib/schemas.ts`). Además, el almacenamiento local de la portada:
   `coverImage` + `coverImageType` (**Bytes** nullables — la imagen en sí, guardada en la
@@ -241,13 +243,14 @@ el mismo shape que el `onError` global. Un cliente de esta API solo necesita ent
 
 | Export | Qué es | Quién lo usa |
 |---|---|---|
-| `mangaStatusSchema` / `MangaStatus` | enum Zod `"reading" \| "completed" \| "dropped"` | `mangaSchema` y el PUT de `library` |
+| `mangaStatusSchema` / `MangaStatus` | enum Zod `"reading" \| "on_hold" \| "completed" \| "dropped"` | `mangaSchema` y el PUT de `library` |
+| `NOT_READING` | todos los estados salvo `reading`: filtrar "leyendo" es "ninguno de estos", así un estado que esta versión no conoce aparece donde se lo muestra y se lo cuenta | `whereFor` de `library` |
 | `mangaSchema` / `MangaDto` | schema Zod del Manga como lo devuelve la API (fechas ISO, `tags` ya como array, `status` como enum) | `events`, `library`, `duplicates` |
 | `readingEventSchema` / `ReadingEventDto` | ídem para ReadingEvent | `events`, `library` |
 | `toMangaDto(manga)` | entidad de Prisma (`Date`, `tags` como string JSON) → DTO (ISO, array real) | handlers de esos módulos |
 | `toEventDto(event)` | ídem para eventos | ídem |
 | `tagsFromJson(raw)` | parsea el string JSON de `tags`; corrupto o no-array degrada a `[]` en vez de romper el listado | `toMangaDto` y el handler de `/api/library` |
-| `statusFromDb(raw)` | valida el `status` guardado; un valor inesperado lee como `"reading"` | ídem |
+| `statusFromDb(raw)` | valida el `status` guardado; un valor inesperado lee como `"reading"` — lo **lee** así, no lo reescribe: el sync guarda tal cual el estado que escribió una versión más nueva | ídem |
 
 ¿Por qué existe este archivo? Dos módulos distintos devuelven Mangas y eventos. Si cada uno
 declarara su propio schema, o se registraría dos veces el componente `"Manga"` en OpenAPI, o
@@ -348,6 +351,9 @@ feed moría entre latidos y el dashboard se perdía los updates).
 | Ruta | Qué hace |
 |---|---|
 | `GET /api/library` | un array de entradas proyectadas (ver abajo); filtros opcionales `?domain=` y `?since=<fecha ISO>` |
+| `GET /api/library/page` | una página de cards: `sort=recent\|oldest\|title\|chapters`, `limit`, `cursor`, `status`, `q`, `domain`, `since`, `before` (leídas al menos una vez, la última antes de esa fecha — las olvidadas) y `tags` |
+| `GET /api/library/summary` | los totales de los tiles y las pestañas; con `?staleBefore=<fecha ISO>` también `stale`, cuántas en `reading` no leés desde entonces (el mismo filtro que la página de Seguimiento) |
+| `GET /api/library/export?format=json\|csv` | la biblioteca como archivo para guardar, en streaming: JSON con cada serie, sus alias y todas sus lecturas, o CSV con una fila por serie |
 | `GET /api/mangas/{id}/history` | `{ manga, events }` con todos los eventos del más nuevo al más viejo · `404` si no existe |
 | `PUT /api/mangas/{id}` | correcciones manuales; body `{ canonicalName?, status?, tags?, coverUrl? }`, al menos un campo — cambiar `coverUrl` (o limpiarlo con `null`) además descarta los bytes guardados de la portada vieja · `400`/`404` |
 | `PUT /api/mangas/{id}/cover-image` | sube los **bytes** de la portada (body binario `image/*`, tope de 5 MB vía middleware `bodyLimit`) — los captura la extensión dentro del navegador real, el único cliente que los CDNs con muro de Cloudflare aceptan · `400`/`404`/`413` |

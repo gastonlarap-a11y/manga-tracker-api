@@ -84,7 +84,13 @@ app.get("/favicon.svg", serveStatic({ path: "./public/favicon.svg" }));
 // platforms it was measured on, Report-Only elsewhere. src/modules/embedding
 // says why, and where the reports land.
 const dashboardFramePolicy = frameAncestors();
-for (const spaPath of ["/", "/manga/:id", "/duplicates", "/extension"]) {
+for (const spaPath of [
+  "/",
+  "/manga/:id",
+  "/duplicates",
+  "/extension",
+  "/follow-up",
+]) {
   app.get(
     spaPath,
     dashboardFramePolicy,

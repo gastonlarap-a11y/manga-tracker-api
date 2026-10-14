@@ -13,6 +13,7 @@ import type {
 } from "../../generated/prisma/client";
 import { calendarDayIn, daysEndingOn } from "../../lib/calendar-day";
 import { chapterKey } from "../../lib/normalize";
+import { type MangaStatus, NOT_READING, statusFromDb } from "../../lib/schemas";
 import { searchKeyOf } from "../../lib/search-key";
 import { publishLibraryChanged } from "../events/events.bus";
 
@@ -78,9 +79,15 @@ function toProjection(entry: LibraryEntry): LibraryProjection {
   };
 }
 
-export type LibrarySort = "recent" | "title" | "chapters";
+export type LibrarySort = "recent" | "oldest" | "title" | "chapters";
 
 export interface LibraryQuery extends LibraryFilters {
+  /**
+   * Cards read at least once, last before then: the ones gone quiet. A card
+   * never read has nothing to go quiet on, so it is left out — the mirror of
+   * `since`, which leaves it out too.
+   */
+  before?: Date;
   /** One status, or every card when absent. */
   status?: string;
   /** Matched against the title, accents and case ignored. */
@@ -99,8 +106,17 @@ function whereFor(query: LibraryQuery): Prisma.LibraryEntryWhereInput {
   if (query.since !== undefined) {
     and.push({ lastReadAt: { gte: query.since } });
   }
+  if (query.before !== undefined) {
+    and.push({ lastReadAt: { gt: NEVER_READ, lt: query.before } });
+  }
   if (query.status !== undefined) {
-    and.push({ status: query.status });
+    // "reading" is every status that is not one of the others, so a status
+    // this build does not know is listed where it is counted and shown.
+    and.push(
+      query.status === "reading"
+        ? { status: { notIn: [...NOT_READING] } }
+        : { status: query.status },
+    );
   }
   const needle = query.q === undefined ? "" : searchKeyOf(query.q);
   if (needle !== "") {
@@ -197,6 +213,16 @@ function afterCursor(
       const at = new Date(Number(cursor.k));
       return { OR: [{ lastReadAt: { lt: at } }, { lastReadAt: at, ...tie }] };
     }
+    case "oldest": {
+      // The exact reverse of recent, ties included: see ORDER.oldest.
+      const at = new Date(Number(cursor.k));
+      return {
+        OR: [
+          { lastReadAt: { gt: at } },
+          { lastReadAt: at, mangaId: { lt: cursor.id } },
+        ],
+      };
+    }
     case "title": {
       const key = String(cursor.k);
       return { OR: [{ sortKey: { gt: key } }, { sortKey: key, ...tie }] };
@@ -215,6 +241,10 @@ const ORDER: Record<
   Prisma.LibraryEntryOrderByWithRelationInput[]
 > = {
   recent: RECENT,
+  // RECENT reversed in both keys, tie-break included, so it is the same
+  // lastReadAt indexes (ASC on mangaId) walked backwards rather than a sort.
+  // Never-read cards therefore come first; `before` is what leaves them out.
+  oldest: [{ lastReadAt: "asc" }, { mangaId: "desc" }],
   title: [{ sortKey: "asc" }, { mangaId: "asc" }],
   chapters: [{ readCount: "desc" }, { mangaId: "asc" }],
 };
@@ -222,6 +252,7 @@ const ORDER: Record<
 function cursorOf(sort: LibrarySort, entry: LibraryEntry): PageCursor {
   switch (sort) {
     case "recent":
+    case "oldest":
       return { k: entry.lastReadAt.getTime(), id: entry.mangaId };
     case "title":
       return { k: entry.sortKey, id: entry.mangaId };
@@ -264,7 +295,12 @@ export async function getLibraryPage(
 }
 
 export interface LibrarySummary {
-  counts: { reading: number; completed: number; dropped: number; all: number };
+  counts: Record<MangaStatus, number> & { all: number };
+  /**
+   * Cards in reading last read before `staleBefore` — the follow-up list's
+   * length, counted with the very filter that list uses. Null when not asked.
+   */
+  stale: number | null;
   chapters: number;
   sites: number;
   activeThisWeek: number;
@@ -276,42 +312,57 @@ export interface LibrarySummary {
 
 const WEEK_MS = 7 * 86_400_000;
 
+export interface SummaryOptions {
+  now?: Date;
+  /** Count the reading cards last read before this instant (`stale`). */
+  staleBefore?: Date;
+}
+
 /**
  * The library's totals — the stats tiles, the counts on the status tabs and
  * the options of the filters — computed by the database over the read model,
  * so the dashboard never needs every card to show them.
  */
-export async function getLibrarySummary(
-  now: Date = new Date(),
-): Promise<LibrarySummary> {
+export async function getLibrarySummary({
+  now = new Date(),
+  staleBefore,
+}: SummaryOptions = {}): Promise<LibrarySummary> {
   await refreshProjection();
-  const [byStatus, sums, domains, activeThisWeek, tagged] = await Promise.all([
-    prisma.libraryEntry.groupBy({ by: ["status"], _count: { _all: true } }),
-    prisma.libraryEntry.aggregate({ _sum: { readCount: true } }),
-    // groupBy, not findMany's `distinct`: Prisma applies that one in memory,
-    // after reading a row per card and site — tens of thousands at scale —
-    // where GROUP BY is answered from the domain index.
-    prisma.libraryEntryDomain.groupBy({
-      by: ["domain"],
-      orderBy: { domain: "asc" },
-    }),
-    prisma.libraryEntry.count({
-      where: { lastReadAt: { gte: new Date(now.getTime() - WEEK_MS) } },
-    }),
-    prisma.libraryEntry.findMany({
-      where: { tags: { not: "[]" } },
-      select: { tags: true },
-    }),
-  ]);
+  const [byStatus, sums, domains, activeThisWeek, tagged, stale] =
+    await Promise.all([
+      prisma.libraryEntry.groupBy({ by: ["status"], _count: { _all: true } }),
+      prisma.libraryEntry.aggregate({ _sum: { readCount: true } }),
+      // groupBy, not findMany's `distinct`: Prisma applies that one in memory,
+      // after reading a row per card and site — tens of thousands at scale —
+      // where GROUP BY is answered from the domain index.
+      prisma.libraryEntryDomain.groupBy({
+        by: ["domain"],
+        orderBy: { domain: "asc" },
+      }),
+      prisma.libraryEntry.count({
+        where: { lastReadAt: { gte: new Date(now.getTime() - WEEK_MS) } },
+      }),
+      prisma.libraryEntry.findMany({
+        where: { tags: { not: "[]" } },
+        select: { tags: true },
+      }),
+      staleBefore === undefined
+        ? Promise.resolve(null)
+        : prisma.libraryEntry.count({
+            where: whereFor({ status: "reading", before: staleBefore }),
+          }),
+    ]);
 
-  const counts = { reading: 0, completed: 0, dropped: 0, all: 0 };
+  const counts = {
+    reading: 0,
+    on_hold: 0,
+    completed: 0,
+    dropped: 0,
+    all: 0,
+  } satisfies LibrarySummary["counts"];
   for (const row of byStatus) {
-    if (row.status === "completed" || row.status === "dropped") {
-      counts[row.status] += row._count._all;
-    } else {
-      // Anything unrecognised is shown as reading, as statusFromDb reads it.
-      counts.reading += row._count._all;
-    }
+    // Anything unrecognised is counted as reading, as statusFromDb reads it.
+    counts[statusFromDb(row.status)] += row._count._all;
     counts.all += row._count._all;
   }
   const tags = new Set<string>();
@@ -324,6 +375,7 @@ export async function getLibrarySummary(
 
   return {
     counts,
+    stale,
     chapters: sums._sum.readCount ?? 0,
     sites: domains.length,
     activeThisWeek,

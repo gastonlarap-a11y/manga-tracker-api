@@ -83,15 +83,15 @@ describe("Sync mapper: SQLite -> shared documents", () => {
     expect(toMangaDoc({ ...mangaRow, deletedAt }).deletedAt).toEqual(deletedAt);
   });
 
-  it("should degrade corrupt tags and status instead of throwing", () => {
-    const corrupt = toMangaDoc({
-      ...mangaRow,
-      tags: "not-json{",
-      status: "banana",
-    });
+  it("should degrade corrupt tags instead of throwing", () => {
+    expect(toMangaDoc({ ...mangaRow, tags: "not-json{" }).tags).toEqual([]);
+  });
 
-    expect(corrupt.tags).toEqual([]);
-    expect(corrupt.status).toBe("reading");
+  it("should push a status this build does not know as it is stored", () => {
+    // "banana" stands for a status a newer release wrote: pushing "reading"
+    // instead is what used to undo it on every machine.
+    expect(toMangaDoc({ ...mangaRow, status: "banana" }).status).toBe("banana");
+    expect(toMangaDoc({ ...mangaRow, status: "" }).status).toBe("reading");
   });
 
   it("should flag stored covers without carrying their bytes", () => {
@@ -143,6 +143,13 @@ describe("Sync mapper: shared documents -> SQLite", () => {
     expect(restored.deletedAt).toBe(null);
   });
 
+  it("should round-trip a series on hold", () => {
+    const doc = toMangaDoc({ ...mangaRow, status: "on_hold" });
+
+    expect(doc.status).toBe("on_hold");
+    expect(fromMangaDoc({ ...doc }).status).toBe("on_hold");
+  });
+
   it("should round-trip events and adapters without losing their keys", () => {
     const event = fromEventDoc({ ...toEventDoc(eventRow, "one-piece") });
     expect(event.id).toBe("event-1");
@@ -170,8 +177,18 @@ describe("Sync mapper: shared documents -> SQLite", () => {
     expect(restored.canonicalName).toBe("");
     expect(restored.tags).toBe('["ok"]');
     expect(restored.coverVersion).toBe(0);
-    expect(restored.status).toBe("reading");
+    // A status a newer release wrote, kept: the DTOs read it as reading.
+    expect(restored.status).toBe("banana");
     expect(restored.createdAt).toEqual(new Date(0));
+  });
+
+  it("should read as reading only what cannot be a status at all", () => {
+    expect(fromMangaDoc({ _id: "s", status: 42 }).status).toBe("reading");
+    expect(fromMangaDoc({ _id: "s", status: "" }).status).toBe("reading");
+    expect(fromMangaDoc({ _id: "s" }).status).toBe("reading");
+    expect(fromMangaDoc({ _id: "s", status: "x".repeat(33) }).status).toBe(
+      "reading",
+    );
   });
 
   it("should never read an unparseable deletedAt as a deletion", () => {

@@ -46,7 +46,8 @@ the user owns, off unless configured.
 - `prisma/schema.prisma` — data model; migrations live in `prisma/migrations/`
 - `public/` — dashboard static build (gitignored), deployed from the sibling
   `manga-tracker-dashboard` repo (`bun run deploy` there); served by `src/index.ts` on
-  `/` + `/manga/:id` + `/duplicates`
+  `/` + `/manga/:id` + `/duplicates` + `/extension` + `/follow-up` — an explicit list with no
+  test behind it: a dashboard route missing from it is a 404 in the packaged app
 - `bunfig.toml` + `test-setup.ts` — bun test preload: throwaway per-run SQLite DB (migrations via `bun:sqlite`)
 - `PLAN.md` + `docs/GUIA-IMPLEMENTACION.md` — roadmap and module specs (events, library, adapters, duplicates)
 
@@ -289,10 +290,25 @@ the user owns, off unless configured.
   - **An `in:` over a list that grows with the library goes through `inChunks`.** The libSQL
     driver refuses a query past its bound-parameter limit, which no library of a few hundred
     mangas reaches and one of ten thousand reaches on its first read.
+  - `oldest` is `recent` reversed in both keys (`lastReadAt ASC, mangaId DESC`), so it walks
+    the same indexes backwards instead of sorting; never-read cards (`lastReadAt` = epoch) come
+    first in it, and `before` is what leaves them out — "read at least once, last before then",
+    the mirror of `since`. `status=reading` means *none of the other statuses*, not an exact
+    match, so a status this build does not know (see the convergence rules) is listed where
+    `statusFromDb` shows it and the summary counts it.
   - Measured at 10 000 series / 1 000 000 readings (`bun run bench:library`): a page in
-    0.4–2 ms at any depth, order or filter; the summary in 6 ms; a reading arriving and the
+    0.4–2 ms at any depth, order or filter (`notIn` for reading costs what the exact match
+    did); the summary in 6 ms, 6.5 ms with the follow-up count; a reading arriving and the
     next page in 17 ms; the first refresh after the migration, which builds everything once,
     in ~5 s.
+- **The export (`GET /library/export?format=json|csv`) is streamed, never built in memory.** At
+  the bench's scale the JSON is ~240 MB (2.5 s) and the CSV ~3 MB (90 ms). It walks the cards
+  in title order through the same keyset paging, a batch of 100 at a time, and pulls the next
+  batch only as fast as the client reads; a failure halfway errors the stream, so a client
+  sees a broken transfer rather than a file that merely looks complete. Natural keys only (no
+  local uuid), no cover bytes, deleted cards left out. It is not a snapshot: a reading
+  recorded meanwhile may or may not be in it. CSV cells starting with `= + - @` or a control
+  character get a leading `'` (`src/lib/csv.ts`): titles are whatever a page said.
 - Duplicate detection is `titleSimilarity` (`src/lib/similarity.ts`): fuzzy token pairing
   weighted by word length, with whole-string edit distance as a floor. Plain Levenshtein over
   slugs was not enough — two sites translating one Japanese title differently score 0.79 as
@@ -358,6 +374,15 @@ the user owns, off unless configured.
   - Documents are keyed by natural keys (`normalizedSlug`, `domain`), not by the local uuid, so
     two machines that discover the same title separately merge instead of colliding on the
     unique slug index.
+  - **`Manga.status` travels as written, never as this build understands it** (`asStatus` in
+    `sync.mapper.ts`; only a value that cannot be a status at all degrades to `reading`). The
+    DTOs read it through `statusFromDb`. Releases up to 0.1.23 coerced an unknown status to
+    `reading` on pull, and their next write to that manga — a cover fetched by the proxy is
+    enough — pushed the coercion back to every machine: that is what `on_hold` meets on a
+    machine that has not updated, and why every machine has to update before it is used.
+    `upsertMangas` replaces the whole document, so a **new document field** is lost the same
+    way to any release older than it; the phone (`manga-tracker-mobile`) never writes manga
+    documents and reads an unknown status as reading.
 - Known limitation: last-write-wins compares wall clocks across machines. Safe for one person on
   NTP-synced Macs who is not editing the same manga in two places at once.
 

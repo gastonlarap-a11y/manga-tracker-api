@@ -120,7 +120,8 @@ lint/typecheck/tests, and every command takes `--vault <name>` to target a diffe
   `launcher.ts` (bundled as `launch.js`, what the installed service runs)
 - `runtime/` — the manifest and lockfile the shipped tree installs its native driver from
 - `public/` — static build of the web dashboard (gitignored; deployed from the sibling
-  `manga-tracker-dashboard` repo), served by the API on `/`, `/manga/:id` and `/duplicates`
+  `manga-tracker-dashboard` repo), served by the API on `/`, `/manga/:id`, `/duplicates`,
+  `/extension` and `/follow-up`
 - `PLAN.md`, `docs/` — implementation roadmap and module specs
 - `COMO-FUNCIONA.md` — in-depth walkthrough (es): every file explained, plus ops (Swagger, Postman, launchd, data locations)
 
@@ -128,6 +129,15 @@ lint/typecheck/tests, and every command takes `--vault <name>` to target a diffe
 
 Interactive Swagger UI at [`/docs`](http://127.0.0.1:5150/docs); the OpenAPI 3.1 spec is
 generated from the Zod route schemas and served at `/openapi.json`.
+
+## Exporting the library
+
+`GET /api/library/export?format=json` downloads a backup that owes nothing to this machine's
+SQLite or to a sync store: every series with its status, tags and aliases, and every chapter
+read with its date and site (format `manga-tracker-library`, version 1). `?format=csv` is one
+row per series — title, status, last chapter, last read, last source URL, sites, tags — which
+spreadsheets open and trackers that match by title import. The desktop app offers both from
+its settings screen. Restoring from a backup is not implemented.
 
 ## Off-site sync (MongoDB Atlas)
 

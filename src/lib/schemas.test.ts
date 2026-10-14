@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { statusFromDb, tagsFromJson, toEventDto, toMangaDto } from "./schemas";
+import {
+  NOT_READING,
+  statusFromDb,
+  tagsFromJson,
+  toEventDto,
+  toMangaDto,
+} from "./schemas";
 
 describe("toMangaDto", () => {
   it("converts createdAt to ISO and decodes status and tags", () => {
@@ -63,9 +69,16 @@ describe("tagsFromJson", () => {
 
 describe("statusFromDb", () => {
   it("keeps valid statuses and degrades unknown values to reading", () => {
+    expect(statusFromDb("on_hold")).toBe("on_hold");
     expect(statusFromDb("completed")).toBe("completed");
     expect(statusFromDb("dropped")).toBe("dropped");
     expect(statusFromDb("garbage")).toBe("reading");
+  });
+});
+
+describe("NOT_READING", () => {
+  it("is every status but reading, so filtering by it follows the enum", () => {
+    expect(NOT_READING).toEqual(["on_hold", "completed", "dropped"]);
   });
 });
 

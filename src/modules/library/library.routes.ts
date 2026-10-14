@@ -12,6 +12,11 @@ import {
   toMangaDto,
 } from "../../lib/schemas";
 import {
+  exportFormatSchema,
+  libraryExportSchema,
+  openLibraryExport,
+} from "./library.export";
+import {
   deleteManga,
   fetchMangaCover,
   getActivity,
@@ -86,7 +91,8 @@ export const libraryPageSchema = z
 
 const libraryPageQuerySchema = z
   .object({
-    sort: z.enum(["recent", "title", "chapters"]).default("recent"),
+    // oldest: least recently read first — the follow-up list.
+    sort: z.enum(["recent", "oldest", "title", "chapters"]).default("recent"),
     // A grid's worth or two; 200 bounds what one request can make the
     // database read, whatever the size of the library.
     limit: z.coerce.number().int().min(1).max(200).default(60),
@@ -95,19 +101,33 @@ const libraryPageQuerySchema = z
     q: z.string().max(200).optional(),
     domain: z.string().optional(),
     since: z.iso.datetime().optional(),
+    // Cards read at least once, last before this instant: never-read cards
+    // have nothing to go quiet on and are left out.
+    before: z.iso.datetime().optional(),
     // Comma-separated; a card must carry every one of them.
     tags: z.string().max(1000).optional(),
   })
   .openapi("LibraryPageQuery");
 
+const librarySummaryQuerySchema = z
+  .object({
+    // Asks for `stale`: how many cards in reading were last read before this.
+    staleBefore: z.iso.datetime().optional(),
+  })
+  .openapi("LibrarySummaryQuery");
+
 export const librarySummarySchema = z
   .object({
     counts: z.object({
       reading: z.number().int(),
+      on_hold: z.number().int(),
       completed: z.number().int(),
       dropped: z.number().int(),
       all: z.number().int(),
     }),
+    // Cards in reading last read before `staleBefore`, counted with the same
+    // filter as `/library/page?status=reading&before=`. Null when not asked.
+    stale: z.number().int().nullable(),
     chapters: z.number().int(),
     sites: z.number().int(),
     activeThisWeek: z.number().int(),
@@ -236,11 +256,41 @@ const getLibrarySummaryRoute = createRoute({
   method: "get",
   path: "/library/summary",
   tags: ["library"],
+  request: { query: librarySummaryQuerySchema },
   responses: {
     200: {
       description:
         "Totals for the stats, the counts per status and the filter options",
       content: { "application/json": { schema: librarySummarySchema } },
+    },
+    400: {
+      description: "Invalid query",
+      content: { "application/json": { schema: errorSchema } },
+    },
+  },
+});
+
+const exportQuerySchema = z
+  .object({ format: exportFormatSchema.default("json") })
+  .openapi("LibraryExportQuery");
+
+const getExportRoute = createRoute({
+  method: "get",
+  path: "/library/export",
+  tags: ["library"],
+  request: { query: exportQuerySchema },
+  responses: {
+    200: {
+      description:
+        "The whole library as a file to keep, streamed: JSON (every series with its aliases and readings) or CSV (one row per series, A–Z)",
+      content: {
+        "application/json": { schema: libraryExportSchema },
+        "text/csv": { schema: z.string() },
+      },
+    },
+    400: {
+      description: "Unknown format",
+      content: { "application/json": { schema: errorSchema } },
     },
   },
 });
@@ -386,6 +436,7 @@ export const libraryRoutes = new OpenAPIHono({ defaultHook })
       q: query.q,
       domain: query.domain,
       since: query.since ? new Date(query.since) : undefined,
+      before: query.before ? new Date(query.before) : undefined,
       tags: query.tags
         ?.split(",")
         .map((tag) => tag.trim())
@@ -396,15 +447,30 @@ export const libraryRoutes = new OpenAPIHono({ defaultHook })
       200,
     );
   })
-  .openapi(getLibrarySummaryRoute, async (c) =>
-    c.json(await getLibrarySummary(), 200),
-  )
+  .openapi(getLibrarySummaryRoute, async (c) => {
+    const { staleBefore } = c.req.valid("query");
+    const summary = await getLibrarySummary({
+      staleBefore: staleBefore ? new Date(staleBefore) : undefined,
+    });
+    return c.json(summary, 200);
+  })
   .openapi(getActivityRoute, async (c) => {
     const query = c.req.valid("query");
     const timeZone =
       query.tz ?? Intl.DateTimeFormat().resolvedOptions().timeZone;
     const days = await getActivity({ days: query.days, timeZone });
     return c.json({ timeZone, days }, 200);
+  })
+  .openapi(getExportRoute, async (c) => {
+    const { format } = c.req.valid("query");
+    const file = await openLibraryExport(format);
+    return c.body(file.body, 200, {
+      "Content-Type": file.contentType,
+      "Content-Disposition": `attachment; filename="${file.fileName}"`,
+      // A copy of someone's library is not something to keep in a cache.
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
   })
   .openapi(getHistoryRoute, async (c) => {
     const { id } = c.req.valid("param");
