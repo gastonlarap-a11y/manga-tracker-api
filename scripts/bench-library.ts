@@ -107,7 +107,11 @@ for (let index = 0; index < series; index++) {
     // One cover in five stored as bytes, as the extension leaves them.
     random() < 0.2 ? new Uint8Array(24_000) : null,
     random() < 0.2 ? "image/webp" : null,
-    random() < 0.85 ? "reading" : random() < 0.5 ? "completed" : "dropped",
+    random() < 0.8
+      ? "reading"
+      : (["on_hold", "completed", "dropped"][
+          Math.floor(random() * 3)
+        ] as string),
     random() < 0.1 ? '["accion"]' : "[]",
     iso(now - threeYears),
     iso(now - threeYears),
@@ -142,6 +146,7 @@ const buildMs = performance.now() - buildStart;
 const { prisma } = await import("../src/db/client");
 const { refreshProjection } = await import("../src/db/library-projection");
 const library = await import("../src/modules/library/library.service");
+const libraryExport = await import("../src/modules/library/library.export");
 const duplicates = await import("../src/modules/duplicates/duplicates.service");
 
 const rows: [string, string][] = [];
@@ -170,6 +175,18 @@ const firstPage = await time("page: 60 most recent", () =>
 await time("page: 60 most recent, reading only", () =>
   library.getLibraryPage({ sort: "recent", limit: 60, status: "reading" }),
 );
+await time("page: 60 oldest", () =>
+  library.getLibraryPage({ sort: "oldest", limit: 60 }),
+);
+const ninetyDaysAgo = new Date(now - 90 * 86_400_000);
+await time("page: follow-up (reading, unread 90 days)", () =>
+  library.getLibraryPage({
+    sort: "oldest",
+    limit: 60,
+    status: "reading",
+    before: ninetyDaysAgo,
+  }),
+);
 await time("page: deep (cursor after 5 pages)", async () => {
   let cursor = firstPage.nextCursor ?? undefined;
   for (let page = 0; page < 4 && cursor !== undefined; page++) {
@@ -194,6 +211,25 @@ await time("page: one site", () =>
 await time("summary (stats, counts, filters)", () =>
   library.getLibrarySummary(),
 );
+const summary = await time("summary, with the follow-up count", () =>
+  library.getLibrarySummary({ staleBefore: ninetyDaysAgo }),
+);
+rows.push(["  (unread 90 days)", (summary.stale ?? 0).toLocaleString()]);
+for (const format of ["json", "csv"] as const) {
+  const bytes = await time(
+    `export: ${format}`,
+    async () => {
+      const file = await libraryExport.openLibraryExport(format);
+      let size = 0;
+      for await (const chunk of file.body) {
+        size += chunk.byteLength;
+      }
+      return size;
+    },
+    1,
+  );
+  rows.push([`  (${format} size)`, `${(bytes / 1_048_576).toFixed(1)} MB`]);
+}
 const activity = await time("activity: 12 weeks", () =>
   library.getActivity({ days: 84, timeZone: "America/Santiago" }),
 );

@@ -9,11 +9,7 @@
 // normalizedSlug, and the slug is immutable (updateManga never recomputes it).
 // Keying by uuid would make those two rows collide on the unique slug index
 // instead of merging.
-import {
-  type MangaStatus,
-  statusFromDb,
-  tagsFromJson,
-} from "../../lib/schemas";
+import { tagsFromJson } from "../../lib/schemas";
 
 export interface MangaDoc {
   /** normalizedSlug — the identity every machine agrees on. */
@@ -25,7 +21,12 @@ export interface MangaDoc {
   coverImageType: string | null;
   coverVersion: number;
   hasStoredCover: boolean;
-  status: MangaStatus;
+  /**
+   * As written, not as this build understands it: see asStatus. Releases up to
+   * 0.1.23 coerced it to a status they knew, and the next write they made to
+   * that manga pushed the coercion back to every machine.
+   */
+  status: string;
   tags: string[];
   createdAt: Date;
   /** Last-write-wins tiebreaker. */
@@ -148,7 +149,7 @@ export function toMangaDoc(manga: MangaRow): MangaDoc {
     coverImageType: manga.coverImageType,
     coverVersion: manga.coverVersion,
     hasStoredCover: manga.hasStoredCover,
-    status: statusFromDb(manga.status),
+    status: asStatus(manga.status),
     tags: tagsFromJson(manga.tags),
     createdAt: manga.createdAt,
     updatedAt: manga.updatedAt,
@@ -236,6 +237,24 @@ function asNullableNumber(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+/** Longer than any status name; past it, the value is noise, not a status. */
+const MAX_STATUS_LENGTH = 32;
+
+/**
+ * A status as a peer wrote it — kept even when this build does not know it.
+ * A newer release adds statuses; reading one of them here as "reading" and
+ * storing that would push "reading" back on this machine's next write to the
+ * manga (a cover fetched is enough), undoing it everywhere. Only what cannot
+ * be a status at all degrades. The DTOs still read it through statusFromDb.
+ */
+export function asStatus(value: unknown): string {
+  return typeof value === "string" &&
+    value !== "" &&
+    value.length <= MAX_STATUS_LENGTH
+    ? value
+    : "reading";
+}
+
 /** Epoch on unreadable input: a wrong timestamp beats losing the row. */
 export function asDate(value: unknown): Date {
   if (value instanceof Date && !Number.isNaN(value.getTime())) {
@@ -304,7 +323,7 @@ export function fromMangaDoc(doc: Record<string, unknown>): MangaMerge {
     coverUrl: asNullableString(doc.coverUrl),
     coverImageType: asNullableString(doc.coverImageType),
     coverVersion: asInt(doc.coverVersion),
-    status: statusFromDb(asString(doc.status, "reading")),
+    status: asStatus(doc.status),
     // Back to the JSON string the SQLite column stores.
     tags: JSON.stringify(tags),
     createdAt: asDate(doc.createdAt),

@@ -138,7 +138,15 @@ describe("the library projection", () => {
           where: { id: manga.id },
           data: {
             canonicalName: `Renombrada ${step}`,
-            status: pick(["reading", "completed", "dropped"]),
+            // plan_to_read: a newer release's status, which the read model
+            // must store as written, like any other.
+            status: pick([
+              "reading",
+              "on_hold",
+              "completed",
+              "dropped",
+              "plan_to_read",
+            ]),
             tags: JSON.stringify(random() < 0.5 ? [] : ["accion"]),
           },
         });

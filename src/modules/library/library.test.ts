@@ -305,6 +305,23 @@ describe("PUT /mangas/{id}", () => {
     expect(stored.tags).toBe('["shonen","piratas"]');
   });
 
+  it("puts a series on hold, and stores it as on_hold", async () => {
+    const manga = await seedManga("one-piece", "One Piece", []);
+
+    const res = await libraryRoutes.request(`/mangas/${manga.id}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ status: "on_hold" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(mangaSchema.parse(await res.json()).status).toBe("on_hold");
+    const stored = await prisma.manga.findUniqueOrThrow({
+      where: { id: manga.id },
+    });
+    expect(stored.status).toBe("on_hold");
+  });
+
   it("sets and clears the manual cover", async () => {
     const manga = await seedManga("one-piece", "One Piece", []);
 
@@ -1106,6 +1123,12 @@ describe("GET /library/page", () => {
       "Ásura",
       "Zetman",
     ]);
+    expect(await walk("sort=oldest")).toEqual([
+      "Zetman",
+      "Ásura",
+      "Berserk",
+      "Invocación",
+    ]);
     // Accents ignored: Ásura sorts as asura.
     expect(await walk("sort=title")).toEqual([
       "Ásura",
@@ -1130,6 +1153,82 @@ describe("GET /library/page", () => {
     ]);
     expect((await names("tags=accion,seinen")).names).toEqual(["Berserk"]);
     expect((await names("tags=accion,romance")).names).toEqual([]);
+  });
+
+  it("orders oldest first as the exact reverse of recent, ties and never-read cards included", async () => {
+    const sameDay = "2026-07-01T10:00:00.000Z";
+    const tied = { label: "Cap. 1", number: 1, domain: "a.com" };
+    await seedManga("uno", "Uno", [{ ...tied, readAt: sameDay }]);
+    await seedManga("dos", "Dos", [{ ...tied, readAt: sameDay }]);
+    await seedManga("tres", "Tres", [
+      { ...tied, readAt: "2026-07-02T10:00:00.000Z" },
+    ]);
+    await seedManga("nunca", "Nunca", []);
+
+    // One card per page, so every tie is crossed by a cursor.
+    const walkOne = async (sort: string) => {
+      const seen: string[] = [];
+      let cursor: string | null = null;
+      do {
+        const { page } = await names(
+          `sort=${sort}&limit=1${cursor ? `&cursor=${cursor}` : ""}`,
+        );
+        seen.push(...page.items.map((item) => item.canonicalName));
+        cursor = page.nextCursor;
+      } while (cursor !== null);
+      return seen;
+    };
+
+    const oldest = await walkOne("oldest");
+    expect(oldest).toHaveLength(4);
+    expect(oldest).toEqual((await walkOne("recent")).toReversed());
+    // Never read is the epoch: first here, and what `before` leaves out.
+    expect(oldest[0]).toBe("Nunca");
+    expect(oldest.at(-1)).toBe("Tres");
+  });
+
+  it("filters by before: read at least once, last before then", async () => {
+    await seedShelf();
+    await seedManga("nunca", "Nunca", []);
+
+    expect(
+      (await names("sort=oldest&before=2026-07-04T12:00:00.000Z")).names,
+    ).toEqual(["Zetman", "Ásura"]);
+    const bad = await libraryRoutes.request("/library/page?before=ayer");
+    expect(bad.status).toBe(400);
+  });
+
+  it("lists on_hold apart from reading", async () => {
+    await seedShelf();
+    await prisma.manga.update({
+      where: { normalizedSlug: "zetman" },
+      data: { status: "on_hold" },
+    });
+
+    expect((await names("status=on_hold")).names).toEqual(["Zetman"]);
+    expect((await names("status=reading")).names).toEqual([
+      "Invocación",
+      "Ásura",
+    ]);
+  });
+
+  it("lists a status this build does not know as reading, as it shows and counts it", async () => {
+    await seedShelf();
+    // A newer release's status, delivered by sync and kept as written.
+    await prisma.manga.update({
+      where: { normalizedSlug: "zetman" },
+      data: { status: "plan_to_read" },
+    });
+
+    const { names: reading, page } = await names("status=reading");
+    expect(reading).toEqual(["Invocación", "Ásura", "Zetman"]);
+    expect(
+      page.items.find((item) => item.canonicalName === "Zetman")?.status,
+    ).toBe("reading");
+    const summary = librarySummarySchema.parse(
+      await (await libraryRoutes.request("/library/summary")).json(),
+    );
+    expect(summary.counts.reading).toBe(3);
   });
 
   it("searches the title ignoring accents and case", async () => {
@@ -1182,13 +1281,63 @@ describe("GET /library/summary", () => {
 
     expect(res.status).toBe(200);
     expect(librarySummarySchema.parse(await res.json())).toEqual({
-      counts: { reading: 1, completed: 1, dropped: 0, all: 2 },
+      counts: { reading: 1, on_hold: 0, completed: 1, dropped: 0, all: 2 },
+      stale: null,
       chapters: 3,
       sites: 2,
       activeThisWeek: 1,
       domains: ["a.com", "b.com"],
       tags: ["accion", "romance"],
     });
+  });
+
+  it("counts the series in reading not read since staleBefore", async () => {
+    const at = (readAt: string) => [
+      { label: "Cap. 1", number: 1, domain: "a.com", readAt },
+    ];
+    await seedManga("olvidada", "Olvidada", at("2024-10-01T10:00:00.000Z"));
+    await seedManga("al-dia", "Al día", at("2026-10-01T10:00:00.000Z"));
+    await seedManga("nunca", "Nunca", []);
+    const paused = await seedManga(
+      "pausada",
+      "Pausada",
+      at("2024-01-01T10:00:00.000Z"),
+    );
+    const done = await seedManga(
+      "terminada",
+      "Terminada",
+      at("2023-01-01T10:00:00.000Z"),
+    );
+    await prisma.manga.update({
+      where: { id: paused.id },
+      data: { status: "on_hold" },
+    });
+    await prisma.manga.update({
+      where: { id: done.id },
+      data: { status: "completed" },
+    });
+
+    const res = await libraryRoutes.request(
+      "/library/summary?staleBefore=2026-07-01T00:00:00.000Z",
+    );
+
+    expect(res.status).toBe(200);
+    const summary = librarySummarySchema.parse(await res.json());
+    expect(summary.stale).toBe(1);
+    expect(summary.counts).toEqual({
+      reading: 3,
+      on_hold: 1,
+      completed: 1,
+      dropped: 0,
+      all: 5,
+    });
+  });
+
+  it("refuses a staleBefore that is not an instant", async () => {
+    const res = await libraryRoutes.request("/library/summary?staleBefore=no");
+
+    expect(res.status).toBe(400);
+    expect(errorSchema.safeParse(await res.json()).success).toBe(true);
   });
 });
 

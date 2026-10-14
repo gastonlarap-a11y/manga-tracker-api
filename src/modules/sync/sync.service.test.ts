@@ -231,6 +231,41 @@ describe("Sync: last-write-wins on mutable fields", () => {
     // And the shared store now carries the winner.
     expect(target.mangas.get("one-piece")?.status).toBe("dropped");
   });
+
+  it("should keep a status this build does not know through a local write and the next push", async () => {
+    const target = createFakeTarget();
+    // A newer release paused the series with a status this build has never
+    // heard of. Releases up to 0.1.23 stored it as "reading", and the next
+    // write they made pushed that back, undoing it everywhere.
+    target.mangas.set(
+      "solo-leveling",
+      peerManga({
+        status: "plan_to_read",
+        updatedAt: new Date("2026-06-01T00:00:00.000Z"),
+      }),
+    );
+    await sync(target);
+
+    // Any later write here — a cover fetched by the proxy is enough.
+    await prisma.manga.update({
+      where: { normalizedSlug: "solo-leveling" },
+      data: {
+        coverVersion: { increment: 1 },
+        updatedAt: new Date("2026-06-02T00:00:00.000Z"),
+      },
+    });
+    const result = await sync(target);
+
+    expect(result.pushed.mangas).toBe(1);
+    expect(target.mangas.get("solo-leveling")?.status).toBe("plan_to_read");
+    expect(
+      (
+        await prisma.manga.findUniqueOrThrow({
+          where: { normalizedSlug: "solo-leveling" },
+        })
+      ).status,
+    ).toBe("plan_to_read");
+  });
 });
 
 describe("Sync: deletion travels as a value", () => {
